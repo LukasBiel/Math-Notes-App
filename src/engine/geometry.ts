@@ -1,4 +1,5 @@
-import type { BBox, El, Point, Stroke } from './types';
+import type { BBox, El, Point, Shape, Stroke } from './types';
+import { shapeBBox, shapeSegments } from './shapes';
 
 export function distPointSeg(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
   const dx = bx - ax;
@@ -93,8 +94,44 @@ export function snapAngle(a: Point, b: Point): Point {
 }
 
 export function elBBox(e: El): BBox {
+  if (e.type === 'shape') return shapeBBox(e);
   if (e.type !== 'stroke') return { minX: e.x, minY: e.y, maxX: e.x + e.w, maxY: e.y + e.h };
   return strokeBBox(e);
 }
 
 export const insideRect = (x: number, y: number, r: BBox) => x >= r.minX && x <= r.maxX && y >= r.minY && y <= r.maxY;
+
+/** Czy odcinek a→b o promieniu r dotyka figury. */
+export function hitShape(s: Shape, ax: number, ay: number, bx: number, by: number, r: number) {
+  const box = shapeBBox(s);
+  if (Math.max(ax, bx) < box.minX - r || Math.min(ax, bx) > box.maxX + r) return false;
+  if (Math.max(ay, by) < box.minY - r || Math.min(ay, by) > box.maxY + r) return false;
+  const R = r + s.width / 2;
+  return shapeSegments(s).some(([p, q]) => distSegSeg(ax, ay, bx, by, p[0], p[1], q[0], q[1]) <= R);
+}
+
+export function pointInPolygon(x: number, y: number, poly: [number, number][]) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i];
+    const [xj, yj] = poly[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/** Element jest w lassie, gdy co najmniej połowa jego punktów leży w środku. */
+export function lassoContains(e: El, poly: [number, number][]) {
+  let pts: [number, number][];
+  if (e.type === 'stroke') {
+    const step = Math.max(1, Math.floor(e.points.length / 40));
+    pts = e.points.filter((_, i) => i % step === 0).map(([x, y]) => [x, y]);
+  } else if (e.type === 'shape') {
+    pts = shapeSegments(e).flatMap(([p, q]) => [p, [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2] as [number, number]]);
+  } else {
+    pts = [[e.x, e.y], [e.x + e.w, e.y], [e.x, e.y + e.h], [e.x + e.w, e.y + e.h], [e.x + e.w / 2, e.y + e.h / 2]];
+  }
+  if (!pts.length) return false;
+  const inside = pts.filter(([x, y]) => pointInPolygon(x, y, poly)).length;
+  return inside / pts.length >= 0.5;
+}

@@ -16,6 +16,7 @@
     "google-auth-library": "^11.1.0",
     "hono": "^4.13.12",
     "jspdf": "^4.2.1",
+    "pdfjs-dist": "^6.5.438",
     "perfect-freehand": "^1.2.3",
     "pg": "^8.23.1",
     "react": "^19.3.0",

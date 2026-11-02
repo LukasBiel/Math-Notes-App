@@ -44,3 +44,25 @@ export const LandscapeIcon = () => (
 export const SelectIcon = () => (
   <svg {...base}><path d="M5 3l14 8-6 1.5L10 19 5 3z" /></svg>
 );
+
+/** Ikony figur – rysowane tak, jak wygląda figura. */
+export function ShapeIcon({ kind }: { kind: string }) {
+  switch (kind) {
+    case 'line':
+      return <svg {...base}><path d="M5 19L19 5" /></svg>;
+    case 'arrow':
+      return <svg {...base}><path d="M5 19L19 5" /><path d="M11 5h8v8" /></svg>;
+    case 'rect':
+      return <svg {...base}><rect x="4" y="6" width="16" height="12" rx="1" /></svg>;
+    case 'ellipse':
+      return <svg {...base}><circle cx="12" cy="12" r="8" /></svg>;
+    case 'triangle':
+      return <svg {...base}><path d="M12 4L20 19H4z" /></svg>;
+    case 'angle':
+      return <svg {...base}><path d="M19 6L5 19h15" /><path d="M10 19a5 5 0 00-1.6-3.7" /></svg>;
+    case 'axes':
+      return <svg {...base}><path d="M3 15h17M17 12l3 3-3 3M9 21V4M6 7l3-3 3 3" /></svg>;
+    default:
+      return <svg {...base}><path d="M3 12h17M17 9l3 3-3 3M7 10v4M12 10v4" /></svg>;
+  }
+}

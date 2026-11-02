@@ -1,7 +1,9 @@
 import { jsPDF } from 'jspdf';
 import { bboxOverlap, elBBox } from '../engine/geometry';
-import { GRID, isImage, isStroke, strokeOutline, traceOutline } from '../engine/render';
-import { A4, type El } from '../engine/types';
+import { GRID, isImage, isInk, strokeOutline, traceOutline } from '../engine/render';
+import { shapeGeometry } from '../engine/shapes';
+import { A4, type El, type Shape } from '../engine/types';
+import type { jsPDF as JsPDF } from 'jspdf';
 
 /** Prostokąt świata, który staje się jedną stroną PDF. */
 export interface PageRect {
@@ -39,7 +41,7 @@ const orientation = (p: PageRect) => (p.w > p.h ? 'landscape' : 'portrait');
 /** Wektorowy PDF: kreski to te same krzywe co na ekranie, więc wydruk jest ostry. */
 export function buildPdf(els: El[], pages: PageRect[], opts: { grid: boolean; images: Map<string, string> }) {
   const doc = new jsPDF({ unit: 'pt', format: 'a4', orientation: orientation(pages[0]) });
-  const strokes = els.filter(isStroke);
+  const ink = els.filter(isInk);
 
   pages.forEach((page, i) => {
     if (i > 0) doc.addPage('a4', orientation(page));
@@ -62,8 +64,12 @@ export function buildPdf(els: El[], pages: PageRect[], opts: { grid: boolean; im
       if (!url || !bboxOverlap(elBBox(im), box)) continue;
       doc.addImage(url, url.startsWith('data:image/png') ? 'PNG' : 'JPEG', X(im.x), Y(im.y), im.w * k, im.h * k, im.imageId);
     }
-    for (const s of strokes) {
+    for (const s of ink) {
       if (!bboxOverlap(elBBox(s), box)) continue;
+      if (s.type === 'shape') {
+        drawShapePdf(doc, s, X, Y, k);
+        continue;
+      }
       if (s.straight) {
         const a = s.points[0];
         const b = s.points[s.points.length - 1];
@@ -96,6 +102,34 @@ export function buildPdf(els: El[], pages: PageRect[], opts: { grid: boolean; im
     }
   });
   return doc;
+}
+
+/** Figura: łamane, groty strzałek i podpisy osi – z tej samej geometrii co na ekranie. */
+function drawShapePdf(doc: JsPDF, s: Shape, X: (x: number) => number, Y: (y: number) => number, k: number) {
+  const g = shapeGeometry(s);
+  doc.setDrawColor(s.color);
+  doc.setFillColor(s.color);
+  doc.setLineWidth(s.width * k);
+  doc.setLineCap('round');
+  doc.setLineJoin('round');
+  for (const p of g.paths) {
+    p.pts.forEach(([x, y], i) => (i ? doc.lineTo(X(x), Y(y)) : doc.moveTo(X(x), Y(y))));
+    if (p.closed) doc.close();
+    doc.stroke();
+  }
+  for (const f of g.fills) {
+    f.forEach(([x, y], i) => (i ? doc.lineTo(X(x), Y(y)) : doc.moveTo(X(x), Y(y))));
+    doc.close();
+    doc.fill();
+  }
+  if (g.texts.length) {
+    doc.setTextColor(s.color);
+    doc.setFont('helvetica', 'normal');
+    for (const t of g.texts) {
+      doc.setFontSize(t.size * k);
+      doc.text(t.text, X(t.x), Y(t.y), { align: t.align, baseline: t.baseline });
+    }
+  }
 }
 
 export const pdfFileName = (title: string) => (title.replace(/[\\/:*?"<>|]+/g, '').trim() || 'notes') + '.pdf';

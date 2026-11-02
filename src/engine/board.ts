@@ -1,11 +1,13 @@
-import type { Camera, El, Frame, ImageEl, Point, Stroke } from './types';
+import type { BBox, Camera, El, Frame, ImageEl, Point, Shape, ShapeKind, Stroke } from './types';
 import { A4 } from './types';
-import { bboxOverlap, elBBox, hitStroke, insideRect, snapAngle, strokeBBox } from './geometry';
+import { bboxOverlap, elBBox, hitShape, hitStroke, insideRect, lassoContains, snapAngle } from './geometry';
 import { History, type Op } from './history';
-import { isTyping, matchShortcut, type Action } from './shortcuts';
-import { drawStroke, frameLabel, frameScale, GRID, isFrame, isImage, isStroke, sortFrames } from './render';
+import { isTyping, matchShortcut, SHAPE_ACTIONS, type Action } from './shortcuts';
+import { drawInk, drawStroke, frameLabel, frameScale, GRID, isFrame, isImage, isInk, sortFrames } from './render';
+import { angleDegrees } from './shapes';
 import { prepareImage } from './images';
-import { useUI, WIDTHS, type BoardApi } from '../ui/store';
+import { startPdfImport, type PdfPageImage } from '../pdf/importPdf';
+import { useUI, WIDTHS, type BoardApi, type SelectionUI } from '../ui/store';
 import { runAppAction } from '../ui/appActions';
 
 /** Pliki obrazków trzymane poza dokumentem (żeby zapis notatki był lekki). */
@@ -22,10 +24,14 @@ export interface BoardInit {
 
 export type SaveFn = (doc: El[], cam: Camera, contentChanged: boolean) => void;
 
+type P = [number, number];
+
 /** przerwa (ms), po której kolejne kreski nie należą już do tej samej „serii” */
 const SERIES_GAP = 1000;
 /** promień gumki w pikselach ekranu */
 const ERASER_PX = 14;
+/** tolerancja klikania w kreskę narzędziem zaznaczania (piksele ekranu) */
+const PICK_PX = 6;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 10;
 /** odstęp między stronami dodawanymi przyciskiem „+ Page” */
@@ -33,20 +39,27 @@ const PAGE_GAP = 80;
 /** zakres skali strony względem A4 */
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 4;
-/** uchwyt zmiany rozmiaru w rogu strony (piksele ekranu) */
+/** uchwyt zmiany rozmiaru w rogu (piksele ekranu) */
 const HANDLE_PX = 10;
+/** jednostka na osiach: 2 kratki = 1 cm, jak w zeszycie */
+const AXIS_UNIT = 2 * GRID;
+/** schowek wewnętrzny (kopiuj/wklej zaznaczenia, także między notatkami) */
+const CLIP_KEY = 'notatnik:clip';
+const CLIP_PREFIX = 'math-notes-clip:';
 
 type Mode =
   | { kind: 'draw'; stroke: Stroke; t0: number; pointerId: number }
   | { kind: 'erase'; items: { el: El; index: number }[]; last: [number, number]; t0: number; pointerId: number }
   | { kind: 'pan'; sx: number; sy: number; cx: number; cy: number; pointerId: number }
+  | { kind: 'shape'; shape: Shape; start: P; pointerId: number }
+  | { kind: 'lasso'; pts: P[]; additive: boolean; pointerId: number }
+  | { kind: 'selMove'; els: El[]; sx: number; sy: number; dx: number; dy: number; moved: boolean; pointerId: number }
+  | { kind: 'selScale'; els: El[]; box: BBox; s: number; pointerId: number }
   | { kind: 'frameResize'; frame: Frame; sx: number; w: number; h: number; moved: boolean; pointerId: number }
-  | { kind: 'imgMove'; el: ImageEl; sx: number; sy: number; dx: number; dy: number; moved: boolean; pointerId: number }
-  | { kind: 'imgResize'; el: ImageEl; sx: number; w: number; h: number; pointerId: number }
   | {
       kind: 'frameDrag';
       frame: Frame;
-      /** z Shiftem: kreski i obrazki, których środek leży w ramce – jadą razem z nią */
+      /** z Shiftem: elementy, których środek leży w ramce – jadą razem z nią */
       contents: El[];
       sx: number;
       sy: number;
@@ -68,8 +81,37 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 const snap = (n: number) => Math.round(n / GRID) * GRID;
 
 function moveEl<T extends El>(e: T, dx: number, dy: number): T {
-  if (e.type !== 'stroke') return { ...e, x: e.x + dx, y: e.y + dy };
-  return { ...e, points: e.points.map(([x, y, p]): Point => [r2(x + dx), r2(y + dy), p]) };
+  if (e.type === 'stroke') return { ...e, points: e.points.map(([x, y, p]): Point => [r2(x + dx), r2(y + dy), p]) };
+  if (e.type === 'shape') return { ...e, pts: e.pts.map(([x, y]): P => [r2(x + dx), r2(y + dy)]) };
+  return { ...e, x: r2(e.x + dx), y: r2(e.y + dy) };
+}
+
+/** Skalowanie względem punktu (ax, ay) – razem z grubością kresek. */
+function scaleEl<T extends El>(e: T, ax: number, ay: number, s: number): T {
+  const X = (x: number) => r2(ax + (x - ax) * s);
+  const Y = (y: number) => r2(ay + (y - ay) * s);
+  if (e.type === 'stroke') return { ...e, width: r2(e.width * s), points: e.points.map(([x, y, p]): Point => [X(x), Y(y), p]) };
+  if (e.type === 'shape') return { ...e, width: r2(e.width * s), unit: e.unit && r2(e.unit * s), pts: e.pts.map(([x, y]): P => [X(x), Y(y)]) };
+  return { ...e, x: X(e.x), y: Y(e.y), w: r2(e.w * s), h: r2(e.h * s) };
+}
+
+function unionBox(els: El[]): BBox | null {
+  if (!els.length) return null;
+  const bs = els.map(elBBox);
+  return {
+    minX: Math.min(...bs.map((b) => b.minX)),
+    minY: Math.min(...bs.map((b) => b.minY)),
+    maxX: Math.max(...bs.map((b) => b.maxX)),
+    maxY: Math.max(...bs.map((b) => b.maxY)),
+  };
+}
+
+/** Kierunek a→b przyciągnięty do wielokrotności 15°. */
+function snap15(a: P, b: P): P {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const step = Math.PI / 12;
+  const ang = Math.round(Math.atan2(b[1] - a[1], b[0] - a[0]) / step) * step;
+  return [r2(a[0] + Math.cos(ang) * len), r2(a[1] + Math.sin(ang) * len)];
 }
 
 export class Board implements BoardApi {
@@ -87,7 +129,7 @@ export class Board implements BoardApi {
   private left = 0;
   private top = 0;
   private mode: Mode | null = null;
-  private keys = { space: false, shift: false };
+  private keys = { space: false, shift: false, alt: false };
   private hover: { x: number; y: number } | null = null;
   /** etykiety ramek na ekranie – do klikania i przeciągania */
   private labels: LabelRect[] = [];
@@ -95,8 +137,12 @@ export class Board implements BoardApi {
   private handles: LabelRect[] = [];
   /** elementy chwilowo rysowane na wierzchu (przeciągane) */
   private hidden = new Set<string>();
-  /** zaznaczony obrazek (przesuwanie, zmiana rozmiaru, Delete) */
-  private selected: string | null = null;
+  /** zaznaczone elementy (id) */
+  private sel = new Set<string>();
+  /** kąt w trakcie rysowania: po pierwszym ramieniu czekamy na kliknięcie drugiego */
+  private angleDraft: { v: P; a: P; color: string; width: number } | null = null;
+  /** ile razy wklejono ten sam schowek – kolejne wklejenia przesuwamy */
+  private pasteCount = new Map<string, number>();
   private images: ImageStore;
   /** wczytane obrazki: null = wczytywanie */
   private imgCache = new Map<string, HTMLImageElement | null>();
@@ -107,6 +153,7 @@ export class Board implements BoardApi {
   private contentDirty = false;
   private camDirty = false;
   private idCounter = 0;
+  private lastSelUI = '';
   private disposers: (() => void)[] = [];
 
   constructor(
@@ -144,10 +191,12 @@ export class Board implements BoardApi {
     this.listen(window, 'keydown', this.onKeyDown);
     this.listen(window, 'keyup', this.onKeyUp);
     this.listen(window, 'blur', () => {
-      this.keys.space = this.keys.shift = false;
+      this.keys.space = this.keys.shift = this.keys.alt = false;
       this.updateCursor();
     });
     this.listen(window, 'pagehide', () => this.flushSave());
+    this.listen(window, 'copy', (e) => this.onCopy(e, false));
+    this.listen(window, 'cut', (e) => this.onCopy(e, true));
     this.listen(window, 'paste', this.onPaste);
     this.listen(this.fg, 'dragover', (e) => {
       if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
@@ -155,14 +204,15 @@ export class Board implements BoardApi {
     this.listen(this.fg, 'drop', this.onDrop);
 
     const unsub = useUI.subscribe((s, prev) => {
-      if (s.tool !== prev.tool || s.frameOrientation !== prev.frameOrientation) {
+      if (s.tool !== prev.tool || s.shapeKind !== prev.shapeKind) this.angleDraft = null;
+      if (s.tool !== prev.tool || s.frameOrientation !== prev.frameOrientation || s.shapeKind !== prev.shapeKind) {
         this.updateCursor();
         this.requestFg();
       }
     });
     this.disposers.push(unsub);
 
-    useUI.setState({ api: this });
+    useUI.setState({ api: this, selection: null });
     this.updateCursor();
     this.syncUI();
   }
@@ -173,7 +223,7 @@ export class Board implements BoardApi {
     cancelAnimationFrame(this.raf);
     this.bg.remove();
     this.fg.remove();
-    if (useUI.getState().api === this) useUI.setState({ api: null });
+    if (useUI.getState().api === this) useUI.setState({ api: null, selection: null });
   }
 
   // ---------- API dla interfejsu ----------
@@ -224,18 +274,16 @@ export class Board implements BoardApi {
     const w = aw * k;
     const h = ah * k;
     let x: number, y: number;
+    const content = unionBox(this.doc.filter((e) => !isFrame(e)));
     if (last) {
       x = last.x;
       y = last.y + last.h + PAGE_GAP;
+    } else if (content) {
+      x = content.minX - 2 * GRID;
+      y = content.minY - 2 * GRID;
     } else {
-      const strokes = this.doc.filter(isStroke);
-      if (strokes.length) {
-        x = Math.min(...strokes.map((s) => strokeBBox(s).minX)) - 2 * GRID;
-        y = Math.min(...strokes.map((s) => strokeBBox(s).minY)) - 2 * GRID;
-      } else {
-        x = this.cam.x + this.w / this.cam.z / 2 - w / 2;
-        y = this.cam.y + 60 / this.cam.z;
-      }
+      x = this.cam.x + this.w / this.cam.z / 2 - w / 2;
+      y = this.cam.y + 60 / this.cam.z;
     }
     const f = this.makeFrame(snap(x), snap(y), w, h);
     this.addEls([f]);
@@ -253,13 +301,50 @@ export class Board implements BoardApi {
     this.updateFrame(id, (f) => ({ ...f, w: f.h, h: f.w }));
   }
 
+  resetFrameSize(id: string) {
+    this.updateFrame(id, (f) => {
+      const [w, h] = A4[f.w > f.h ? 'landscape' : 'portrait'];
+      return { ...f, w, h };
+    });
+  }
+
   deleteFrame(id: string) {
-    const index = this.doc.findIndex((e) => e.id === id);
-    if (index < 0) return;
-    const el = this.doc[index];
-    this.doc.splice(index, 1);
-    const now = performance.now();
-    this.pushOp({ kind: 'remove', items: [{ el, index }], t0: now, t1: now });
+    this.removeIds(new Set([id]));
+  }
+
+  recolorSelection(color: string) {
+    const items = this.selEls()
+      .filter(isInk)
+      .filter((e) => e.color !== color)
+      .map((before) => ({ before, after: { ...before, color } as El }));
+    this.updateItems(items);
+  }
+
+  duplicateSelection() {
+    const copies = this.selEls().map((e) => moveEl({ ...e, id: this.newId() }, 2 * GRID, 2 * GRID));
+    if (!copies.length) return;
+    this.addEls(copies);
+    this.setSel(copies.map((e) => e.id));
+  }
+
+  deleteSelection() {
+    this.removeIds(new Set(this.sel));
+    this.setSel([]);
+  }
+
+  /** Kopiuje zaznaczenie do schowka wewnętrznego; zwraca znacznik do schowka systemowego. */
+  copySelection() {
+    const els = this.selEls();
+    if (!els.length) return '';
+    const marker = CLIP_PREFIX + this.newId();
+    try {
+      localStorage.setItem(CLIP_KEY, JSON.stringify({ marker, els }));
+    } catch {
+      return '';
+    }
+    // znacznik w schowku systemowym: późniejszy zrzut ekranu „wygra” z naszym schowkiem
+    void navigator.clipboard?.writeText(marker).catch(() => {});
+    return marker;
   }
 
   // ---------- dokument i historia ----------
@@ -274,13 +359,29 @@ export class Board implements BoardApi {
     this.pushOp({ kind: 'add', els, t0: now, t1: now });
   }
 
+  private removeIds(ids: Set<string>) {
+    const items: { el: El; index: number }[] = [];
+    for (let i = this.doc.length - 1; i >= 0; i--) {
+      if (ids.has(this.doc[i].id)) {
+        items.push({ el: this.doc[i], index: i });
+        this.doc.splice(i, 1);
+      }
+    }
+    if (!items.length) return;
+    const now = performance.now();
+    this.pushOp({ kind: 'remove', items, t0: now, t1: now });
+  }
+
+  private updateItems(items: { before: El; after: El }[]) {
+    if (!items.length) return;
+    for (const { before, after } of items) this.replace(before, after);
+    const now = performance.now();
+    this.pushOp({ kind: 'update', items, t0: now, t1: now });
+  }
+
   private updateFrame(id: string, fn: (f: Frame) => Frame) {
     const before = this.doc.find((e): e is Frame => e.id === id && isFrame(e));
-    if (!before) return;
-    const after = fn(before);
-    this.replace(before, after);
-    const now = performance.now();
-    this.pushOp({ kind: 'update', items: [{ before, after }], t0: now, t1: now });
+    if (before) this.updateItems([{ before, after: fn(before) }]);
   }
 
   private replace(from: El, to: El) {
@@ -342,7 +443,7 @@ export class Board implements BoardApi {
   }
 
   private newId() {
-    return Date.now().toString(36) + (this.idCounter++).toString(36);
+    return Date.now().toString(36) + (this.idCounter++).toString(36) + Math.random().toString(36).slice(2, 5);
   }
 
   private scheduleSave() {
@@ -365,6 +466,10 @@ export class Board implements BoardApi {
 
   private toWorld(sx: number, sy: number): [number, number] {
     return [sx / this.cam.z + this.cam.x, sy / this.cam.z + this.cam.y];
+  }
+
+  private toScreen(x: number, y: number): [number, number] {
+    return [(x - this.cam.x) * this.cam.z, (y - this.cam.y) * this.cam.z];
   }
 
   private zoomAt(sx: number, sy: number, f: number) {
@@ -393,36 +498,76 @@ export class Board implements BoardApi {
     return null;
   }
 
-  // ---------- obrazki ----------
-
-  private selectedImage() {
-    return this.selected ? this.doc.find((e): e is ImageEl => e.id === this.selected && isImage(e)) : undefined;
-  }
-
-  private select(id: string | null) {
-    if (this.selected === id) return;
-    this.selected = id;
-    this.requestBg();
-  }
-
-  private inEl(el: ImageEl, sx: number, sy: number) {
+  /** Najwyżej położona strona pod punktem ekranu. */
+  private frameAt(sx: number, sy: number) {
     const [wx, wy] = this.toWorld(sx, sy);
-    return insideRect(wx, wy, elBBox(el));
-  }
-
-  private imageAt(sx: number, sy: number) {
-    for (let i = this.doc.length - 1; i >= 0; i--) {
-      const el = this.doc[i];
-      if (isImage(el) && this.inEl(el, sx, sy)) return el;
+    const frames = this.doc.filter(isFrame);
+    for (let i = frames.length - 1; i >= 0; i--) {
+      if (insideRect(wx, wy, elBBox(frames[i]))) return frames[i];
     }
     return undefined;
   }
 
-  private onImageHandle(el: ImageEl, sx: number, sy: number) {
-    const hx = (el.x + el.w - this.cam.x) * this.cam.z;
-    const hy = (el.y + el.h - this.cam.y) * this.cam.z;
+  // ---------- zaznaczenie ----------
+
+  private selEls() {
+    return this.doc.filter((e) => this.sel.has(e.id));
+  }
+
+  private setSel(ids: string[]) {
+    this.sel = new Set(ids);
+    this.requestBg();
+  }
+
+  private selBox() {
+    return unionBox(this.selEls());
+  }
+
+  private onSelHandle(b: BBox, sx: number, sy: number) {
+    const [hx, hy] = this.toScreen(b.maxX, b.maxY);
     return Math.abs(sx - hx) <= HANDLE_PX && Math.abs(sy - hy) <= HANDLE_PX;
   }
+
+  private inBox(b: BBox, sx: number, sy: number) {
+    const [x, y] = this.toWorld(sx, sy);
+    return insideRect(x, y, b);
+  }
+
+  /** Element pod kursorem: najpierw pismo i figury, potem obrazki. */
+  private elementAt(sx: number, sy: number) {
+    const [x, y] = this.toWorld(sx, sy);
+    const r = PICK_PX / this.cam.z;
+    for (let i = this.doc.length - 1; i >= 0; i--) {
+      const e = this.doc[i];
+      if (e.type === 'stroke' && hitStroke(e, x, y, x, y, r)) return e;
+      if (e.type === 'shape' && hitShape(e, x, y, x, y, r)) return e;
+    }
+    for (let i = this.doc.length - 1; i >= 0; i--) {
+      const e = this.doc[i];
+      if (isImage(e) && insideRect(x, y, elBBox(e))) return e;
+    }
+    return undefined;
+  }
+
+  /** Pokazuje / chowa pasek akcji zaznaczenia (React). */
+  private publishSelection() {
+    let ui: SelectionUI | null = null;
+    const m = this.mode;
+    const busy = m?.kind === 'selMove' || m?.kind === 'selScale' || m?.kind === 'lasso';
+    const els = this.selEls();
+    const b = unionBox(els);
+    if (b && !busy) {
+      const [x, y] = this.toScreen(b.minX, b.minY);
+      ui = { x, y, w: (b.maxX - b.minX) * this.cam.z, h: (b.maxY - b.minY) * this.cam.z, count: els.length, ink: els.some(isInk) };
+    }
+    const key = JSON.stringify(ui);
+    if (key !== this.lastSelUI) {
+      this.lastSelUI = key;
+      useUI.setState({ selection: ui });
+    }
+  }
+
+  // ---------- obrazki i schowek ----------
 
   /** Obrazek z pamięci podręcznej; jeśli go nie ma – wczytuje i przerysowuje po wczytaniu. */
   private getImg(imageId: string) {
@@ -441,37 +586,85 @@ export class Board implements BoardApi {
     return null;
   }
 
-  private drawImageEl(c: CanvasRenderingContext2D, el: ImageEl, w = el.w, h = el.h) {
+  private drawImageEl(c: CanvasRenderingContext2D, el: ImageEl) {
     const img = this.getImg(el.imageId);
     if (img) {
-      c.drawImage(img, el.x, el.y, w, h);
+      c.drawImage(img, el.x, el.y, el.w, el.h);
     } else {
       c.fillStyle = '#eef1f6';
-      c.fillRect(el.x, el.y, w, h);
+      c.fillRect(el.x, el.y, el.w, el.h);
     }
   }
 
-  private drawSelection(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
-    const z = this.cam.z;
-    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    c.strokeStyle = '#1f5fd1';
-    c.lineWidth = 1.5;
-    c.strokeRect((x - this.cam.x) * z, (y - this.cam.y) * z, w * z, h * z);
-    this.drawHandle(c, (x + w - this.cam.x) * z, (y + h - this.cam.y) * z);
+  /** Rysuje elementy w kolejności warstw: obrazki pod spodem, pismo i figury na wierzchu. */
+  private drawEls(c: CanvasRenderingContext2D, els: El[]) {
+    for (const e of els) if (isImage(e)) this.drawImageEl(c, e);
+    for (const e of els) if (isInk(e)) drawInk(c, e);
   }
+
+  private onCopy = (e: ClipboardEvent, cut: boolean) => {
+    const ui = useUI.getState();
+    if (isTyping(e.target) || ui.newNote.open || ui.exportOpen || !this.sel.size) return;
+    const marker = this.copySelection();
+    if (!marker) return;
+    e.clipboardData?.setData('text/plain', marker);
+    e.preventDefault();
+    if (cut) this.deleteSelection();
+  };
 
   private onPaste = (e: ClipboardEvent) => {
     const ui = useUI.getState();
     if (isTyping(e.target) || ui.newNote.open || ui.exportOpen) return;
     const item = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith('image/'));
     const file = item?.getAsFile();
-    if (!file) return;
-    e.preventDefault();
-    void this.insertImage(file, this.w / 2, this.h / 2);
+    if (file) {
+      e.preventDefault();
+      void this.insertImage(file, this.w / 2, this.h / 2);
+      return;
+    }
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    if (text.startsWith(CLIP_PREFIX)) {
+      e.preventDefault();
+      this.pasteClip(text);
+    }
   };
 
+  private pasteClip(marker: string) {
+    let els: El[] = [];
+    try {
+      const data = JSON.parse(localStorage.getItem(CLIP_KEY) ?? 'null');
+      if (data?.marker === marker) els = data.els;
+    } catch {
+      return;
+    }
+    const b = unionBox(els);
+    if (!b) return;
+    // widoczne źródło → wklej obok (każde kolejne trochę dalej); niewidoczne → na środek ekranu
+    const view = { minX: this.cam.x, minY: this.cam.y, maxX: this.cam.x + this.w / this.cam.z, maxY: this.cam.y + this.h / this.cam.z };
+    let dx: number, dy: number;
+    if (bboxOverlap(b, view)) {
+      const n = (this.pasteCount.get(marker) ?? 0) + 1;
+      this.pasteCount.set(marker, n);
+      dx = dy = 2 * GRID * n;
+    } else {
+      const [cx, cy] = this.toWorld(this.w / 2, this.h / 2);
+      dx = snap(cx - (b.minX + b.maxX) / 2);
+      dy = snap(cy - (b.minY + b.maxY) / 2);
+    }
+    const copies = els.map((e) => moveEl({ ...e, id: this.newId() }, dx, dy));
+    this.addEls(copies);
+    this.setSel(copies.map((e) => e.id));
+  }
+
   private onDrop = (e: DragEvent) => {
-    const file = [...(e.dataTransfer?.files ?? [])].find((f) => f.type.startsWith('image/'));
+    const files = [...(e.dataTransfer?.files ?? [])];
+    const pdf = files.find((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+    if (pdf) {
+      e.preventDefault();
+      void startPdfImport(pdf);
+      return;
+    }
+    const file = files.find((f) => f.type.startsWith('image/'));
     if (!file) return;
     e.preventDefault();
     const [sx, sy] = this.screenOf(e);
@@ -488,34 +681,100 @@ export class Board implements BoardApi {
     const [cx, cy] = this.toWorld(sx, sy);
     const el: ImageEl = { id: this.newId(), type: 'image', x: r2(cx - (w * k) / 2), y: r2(cy - (h * k) / 2), w: r2(w * k), h: r2(h * k), imageId };
     this.addEls([el]);
-    this.select(el.id);
+    this.setSel([el.id]);
   }
 
-  private deleteSelected() {
-    const index = this.doc.findIndex((e) => e.id === this.selected);
-    this.selected = null;
-    if (index < 0) return;
-    const el = this.doc[index];
-    this.doc.splice(index, 1);
-    const now = performance.now();
-    this.pushOp({ kind: 'remove', items: [{ el, index }], t0: now, t1: now });
-  }
-
-  /** Najwyżej położona strona pod punktem ekranu. */
-  private frameAt(sx: number, sy: number) {
-    const [wx, wy] = this.toWorld(sx, sy);
-    const frames = this.doc.filter(isFrame);
-    for (let i = frames.length - 1; i >= 0; i--) {
-      if (insideRect(wx, wy, elBBox(frames[i]))) return frames[i];
+  /**
+   * Strony zaimportowanego PDF: obrazek + ramka A4 na każdą stronę, jedna pod drugą,
+   * pod dotychczasową treścią. Eksport PDF odda ten sam dokument z dopiskami.
+   */
+  async insertPdfPages(pages: PdfPageImage[]) {
+    if (!pages.length) return;
+    // 1 pt PDF → świat tak, żeby strona A4 miała dokładnie rozmiar ramki A4
+    const K = A4.portrait[0] / 595.28;
+    const content = unionBox(this.doc);
+    let x: number, y: number;
+    if (content) {
+      x = snap(content.minX);
+      y = snap(content.maxY + 4 * GRID);
+    } else {
+      const [cx, cy] = this.toWorld(this.w / 2, 90);
+      x = snap(cx - (pages[0].wPt * K) / 2);
+      y = snap(cy);
     }
-    return undefined;
+    const els: El[] = [];
+    for (const p of pages) {
+      const w = r2(p.wPt * K);
+      const h = r2(p.hPt * K);
+      const imageId = this.newId() + 'i';
+      await this.images.put(imageId, p.dataUrl);
+      // inne formaty niż A4: najmniejsza strona A4 (w skali), w której mieści się cała kartka
+      const [aw, ah] = A4[w > h ? 'landscape' : 'portrait'];
+      const k = Math.max(w / aw, h / ah);
+      els.push({ id: this.newId(), type: 'image', x, y, w, h, imageId });
+      els.push(this.makeFrame(x, y, r2(aw * k), r2(ah * k)));
+      y = snap(y + ah * k + PAGE_GAP);
+    }
+    this.addEls(els);
+    const first = els[0] as ImageEl;
+    const z = this.cam.z;
+    this.cam = { ...this.cam, x: first.x + first.w / 2 - this.w / z / 2, y: first.y - 80 / z };
+    this.requestBg();
+    this.requestFg();
+    this.camChanged();
   }
 
-  resetFrameSize(id: string) {
-    this.updateFrame(id, (f) => {
-      const [w, h] = A4[f.w > f.h ? 'landscape' : 'portrait'];
-      return { ...f, w, h };
-    });
+  // ---------- figury ----------
+
+  /** Punkt figury: przyciągnięty do kratki (przy dużym zoomie do pół kratki), z Altem swobodnie. */
+  private shapePoint(sx: number, sy: number, free: boolean): P {
+    const [x, y] = this.toWorld(sx, sy);
+    if (free) return [r2(x), r2(y)];
+    const step = this.cam.z >= 3 ? GRID / 2 : GRID;
+    return [Math.round(x / step) * step, Math.round(y / step) * step];
+  }
+
+  /** Punkty figury z przeciągnięcia start→end (Shift: kwadrat, koło, 15°, trójkąt prostokątny…). */
+  private shapeFrom(kind: ShapeKind, a: P, b: P, shift: boolean): Pick<Shape, 'pts' | 'right'> {
+    switch (kind) {
+      case 'line':
+      case 'arrow':
+      case 'angle':
+        return { pts: [a, shift ? snap15(a, b) : b] };
+      case 'rect':
+      case 'ellipse': {
+        if (!shift) return { pts: [a, b] };
+        const d = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+        return { pts: [a, [a[0] + Math.sign(b[0] - a[0] || 1) * d, a[1] + Math.sign(b[1] - a[1] || 1) * d]] };
+      }
+      case 'triangle':
+        return { pts: [a, b], right: shift };
+      case 'axes': {
+        const minX = Math.min(a[0], b[0]), maxY = Math.max(a[1], b[1]);
+        // domyślnie początek układu na środku; z Shiftem w lewym dolnym rogu (I ćwiartka)
+        const o: P = shift ? [minX + AXIS_UNIT, maxY - AXIS_UNIT] : [snap((a[0] + b[0]) / 2), snap((a[1] + b[1]) / 2)];
+        return { pts: [a, b, o] };
+      }
+      case 'numberline':
+        return { pts: [a, [b[0], a[1]], [snap((a[0] + b[0]) / 2), a[1]]] };
+    }
+  }
+
+  private angleEnd(sx: number, sy: number, free: boolean, shift: boolean): P {
+    const d = this.angleDraft!;
+    const p = this.shapePoint(sx, sy, free);
+    if (!shift) return p;
+    // z Shiftem: kąt między ramionami co 15°
+    const a1 = Math.atan2(d.a[1] - d.v[1], d.a[0] - d.v[0]);
+    const step = Math.PI / 12;
+    const rel = Math.round((Math.atan2(p[1] - d.v[1], p[0] - d.v[0]) - a1) / step) * step;
+    const len = Math.hypot(p[0] - d.v[0], p[1] - d.v[1]);
+    return [r2(d.v[0] + Math.cos(a1 + rel) * len), r2(d.v[1] + Math.sin(a1 + rel) * len)];
+  }
+
+  private finishShape(shape: Shape) {
+    this.addEls([shape]);
+    useUI.setState({ tool: 'pen' }); // jedna figura – potem od razu podpisywanie
   }
 
   // ---------- wejście ----------
@@ -544,28 +803,49 @@ export class Board implements BoardApi {
       return;
     }
 
-    // zaznaczony obrazek: róg = rozmiar, środek = przesuwanie, klik obok = odznacz
-    if (e.button === 0) {
-      const sel = this.selectedImage();
-      if (sel && this.onImageHandle(sel, sx, sy)) {
+    // zaznaczenie: róg = skalowanie, środek = przesuwanie, klik obok = odznacz
+    if (e.button === 0 && this.sel.size) {
+      const box = this.selBox();
+      if (box && this.onSelHandle(box, sx, sy)) {
         this.fg.setPointerCapture(id);
-        this.mode = { kind: 'imgResize', el: sel, sx, w: sel.w, h: sel.h, pointerId: id };
+        this.mode = { kind: 'selScale', els: this.selEls(), box, s: 1, pointerId: id };
+        this.hidden = new Set(this.sel);
+        this.requestBg();
         this.updateCursor();
         return;
       }
-      const hit = sel && this.inEl(sel, sx, sy) ? sel : ui.tool === 'select' ? this.imageAt(sx, sy) : undefined;
-      if (hit) {
-        this.select(hit.id);
+      if (box && this.inBox(box, sx, sy) && !(ui.tool === 'select' && e.shiftKey)) {
         this.fg.setPointerCapture(id);
-        this.mode = { kind: 'imgMove', el: hit, sx, sy, dx: 0, dy: 0, moved: false, pointerId: id };
+        this.mode = { kind: 'selMove', els: this.selEls(), sx, sy, dx: 0, dy: 0, moved: false, pointerId: id };
         this.updateCursor();
         return;
       }
-      if (sel) {
+      if (ui.tool !== 'select') {
         // klik obok tylko odznacza – nie zostawia kropki
-        this.select(null);
+        this.setSel([]);
         return;
       }
+    }
+
+    if (e.button === 0 && ui.tool === 'select') {
+      this.fg.setPointerCapture(id);
+      const hit = this.elementAt(sx, sy);
+      if (hit) {
+        if (e.shiftKey) {
+          const next = new Set(this.sel);
+          if (next.has(hit.id)) next.delete(hit.id);
+          else next.add(hit.id);
+          this.setSel([...next]);
+          this.mode = null;
+          return;
+        }
+        this.setSel([hit.id]);
+        this.mode = { kind: 'selMove', els: this.selEls(), sx, sy, dx: 0, dy: 0, moved: false, pointerId: id };
+        return;
+      }
+      if (!e.shiftKey) this.setSel([]);
+      this.mode = { kind: 'lasso', pts: [this.toWorld(sx, sy)], additive: e.shiftKey, pointerId: id };
+      return;
     }
 
     // róg strony: zmiana rozmiaru (zawsze w proporcjach A4)
@@ -580,7 +860,7 @@ export class Board implements BoardApi {
       }
     }
 
-    // etykieta strony: przeciągnij = przesuń stronę z zawartością, kliknij = menu
+    // etykieta strony: przeciągnij = przesuń stronę, kliknij = menu
     // z narzędziem strony (F) stronę łapie się w dowolnym miejscu
     const label = e.button === 0 ? this.labelAt(sx, sy) : null;
     const grabbed = label
@@ -622,6 +902,32 @@ export class Board implements BoardApi {
       return;
     }
 
+    if (e.button === 0 && ui.tool === 'shape') {
+      // kąt, drugie kliknięcie: drugie ramię
+      if (ui.shapeKind === 'angle' && this.angleDraft) {
+        const d = this.angleDraft;
+        this.angleDraft = null;
+        this.finishShape({
+          id: this.newId(), type: 'shape', kind: 'angle', color: d.color, width: d.width,
+          pts: [d.v, d.a, this.angleEnd(sx, sy, e.altKey, e.shiftKey)],
+        });
+        return;
+      }
+      this.fg.setPointerCapture(id);
+      const p = this.shapePoint(sx, sy, e.altKey);
+      this.mode = {
+        kind: 'shape',
+        start: p,
+        pointerId: id,
+        shape: {
+          id: this.newId(), type: 'shape', kind: ui.shapeKind, color: ui.color, width: ui.width,
+          unit: AXIS_UNIT, ...this.shapeFrom(ui.shapeKind, p, p, e.shiftKey),
+        },
+      };
+      this.requestFg();
+      return;
+    }
+
     if (e.button === 0 && ui.tool === 'pen') {
       this.fg.setPointerCapture(id);
       const [x, y] = this.toWorld(sx, sy);
@@ -648,11 +954,12 @@ export class Board implements BoardApi {
   private onMove = (e: PointerEvent) => {
     const [sx, sy] = this.screenOf(e);
     this.hover = { x: sx, y: sy };
+    this.keys.alt = e.altKey;
     const m = this.mode;
 
     if (!m || m.pointerId !== e.pointerId) {
       const tool = useUI.getState().tool;
-      if (tool === 'eraser' || tool === 'frame') this.requestFg();
+      if (tool === 'eraser' || tool === 'frame' || this.angleDraft) this.requestFg();
       this.updateCursor();
       return;
     }
@@ -663,11 +970,26 @@ export class Board implements BoardApi {
       return;
     }
 
-    if (m.kind === 'imgMove') {
+    if (m.kind === 'shape') {
+      const p = this.shapePoint(sx, sy, e.altKey);
+      m.shape = { ...m.shape, ...this.shapeFrom(m.shape.kind, m.start, p, e.shiftKey) };
+      this.requestFg();
+      return;
+    }
+
+    if (m.kind === 'lasso') {
+      const p = this.toWorld(sx, sy);
+      const last = m.pts[m.pts.length - 1];
+      if (Math.hypot(p[0] - last[0], p[1] - last[1]) * this.cam.z > 3) m.pts.push(p);
+      this.requestFg();
+      return;
+    }
+
+    if (m.kind === 'selMove') {
       if (!m.moved && Math.hypot(sx - m.sx, sy - m.sy) < 3) return;
       if (!m.moved) {
         m.moved = true;
-        this.hidden = new Set([m.el.id]);
+        this.hidden = new Set(m.els.map((el) => el.id));
         this.requestBg();
       }
       m.dx = (sx - m.sx) / this.cam.z;
@@ -676,13 +998,11 @@ export class Board implements BoardApi {
       return;
     }
 
-    if (m.kind === 'imgResize') {
-      if (!this.hidden.has(m.el.id)) {
-        this.hidden = new Set([m.el.id]);
-        this.requestBg();
-      }
-      m.w = Math.max(20, m.el.w + (sx - m.sx) / this.cam.z);
-      m.h = (m.w * m.el.h) / m.el.w;
+    if (m.kind === 'selScale') {
+      const [x, y] = this.toWorld(sx, sy);
+      const bw = m.box.maxX - m.box.minX || 1;
+      const bh = m.box.maxY - m.box.minY || 1;
+      m.s = Math.max(0.1, Math.max((x - m.box.minX) / bw, (y - m.box.minY) / bh));
       this.requestFg();
       return;
     }
@@ -753,24 +1073,38 @@ export class Board implements BoardApi {
       this.pushOp({ kind: 'add', els: [s], t0: m.t0, t1 });
     } else if (m.kind === 'erase') {
       if (m.items.length) this.pushOp({ kind: 'remove', items: m.items, t0: m.t0, t1 });
-    } else if (m.kind === 'imgMove' || m.kind === 'imgResize') {
+    } else if (m.kind === 'shape') {
+      const [a, b] = m.shape.pts;
+      const big = Math.hypot(b[0] - a[0], b[1] - a[1]) >= GRID / 2;
+      if (big && m.shape.kind === 'angle') {
+        // pierwsze ramię gotowe – drugie wskazujemy kliknięciem
+        this.angleDraft = { v: a, a: b, color: m.shape.color, width: m.shape.width };
+      } else if (big) {
+        this.finishShape(m.shape);
+      }
+    } else if (m.kind === 'lasso') {
+      if (m.pts.length > 2) {
+        const hits = this.doc.filter((el) => !isFrame(el) && lassoContains(el, m.pts)).map((el) => el.id);
+        this.setSel(m.additive ? [...this.sel, ...hits] : hits);
+      }
+    } else if (m.kind === 'selMove') {
       this.hidden = new Set();
-      const after: ImageEl =
-        m.kind === 'imgMove'
-          ? { ...m.el, x: r2(m.el.x + m.dx), y: r2(m.el.y + m.dy) }
-          : { ...m.el, w: r2(m.w), h: r2(m.h) };
-      if (after.x !== m.el.x || after.y !== m.el.y || after.w !== m.el.w) {
-        this.replace(m.el, after);
-        this.pushOp({ kind: 'update', items: [{ before: m.el, after }], t0: t1, t1 });
+      if (m.moved && (m.dx || m.dy)) {
+        this.updateItems(m.els.map((before) => ({ before, after: moveEl(before, m.dx, m.dy) })));
+      } else {
+        this.requestBg();
+      }
+    } else if (m.kind === 'selScale') {
+      this.hidden = new Set();
+      if (Math.abs(m.s - 1) > 0.005) {
+        this.updateItems(m.els.map((before) => ({ before, after: scaleEl(before, m.box.minX, m.box.minY, m.s) })));
       } else {
         this.requestBg();
       }
     } else if (m.kind === 'frameResize') {
       this.hidden = new Set();
       if (m.w !== m.frame.w) {
-        const after = { ...m.frame, w: m.w, h: m.h };
-        this.replace(m.frame, after);
-        this.pushOp({ kind: 'update', items: [{ before: m.frame, after }], t0: t1, t1 });
+        this.updateItems([{ before: m.frame, after: { ...m.frame, w: m.w, h: m.h } }]);
       } else {
         this.requestBg();
       }
@@ -779,9 +1113,7 @@ export class Board implements BoardApi {
       if (!m.moved) {
         this.frameMenu(m.frame, e.clientX, e.clientY);
       } else if (m.dx || m.dy) {
-        const items = [m.frame, ...m.contents].map((before) => ({ before, after: moveEl(before, m.dx, m.dy) }));
-        for (const { before, after } of items) this.replace(before, after);
-        this.pushOp({ kind: 'update', items, t0: t1, t1 });
+        this.updateItems([m.frame, ...m.contents].map((before) => ({ before, after: moveEl(before, m.dx, m.dy) })));
       } else {
         this.requestBg();
       }
@@ -789,6 +1121,7 @@ export class Board implements BoardApi {
       this.camChanged();
     }
     this.updateCursor();
+    this.requestBg();
     this.requestFg();
   };
 
@@ -821,9 +1154,13 @@ export class Board implements BoardApi {
     let hit = false;
     for (let i = this.doc.length - 1; i >= 0; i--) {
       const el = this.doc[i];
-      if (isStroke(el) && hitStroke(el, a[0], a[1], b[0], b[1], r)) {
+      const touched =
+        (el.type === 'stroke' && hitStroke(el, a[0], a[1], b[0], b[1], r)) ||
+        (el.type === 'shape' && hitShape(el, a[0], a[1], b[0], b[1], r));
+      if (touched) {
         this.doc.splice(i, 1);
         m.items.push({ el, index: i });
+        this.sel.delete(el.id);
         hit = true;
       }
     }
@@ -841,6 +1178,7 @@ export class Board implements BoardApi {
         ? { ...this.cam, x: this.cam.x + d / this.cam.z }
         : { ...this.cam, y: this.cam.y + d / this.cam.z };
       this.requestBg();
+      this.requestFg();
       this.camChanged();
       return;
     }
@@ -866,22 +1204,23 @@ export class Board implements BoardApi {
         const s = m.stroke;
         s.straight = true;
         s.points = [s.points[0], snapAngle(s.points[0], s.points[s.points.length - 1])];
-        this.requestFg();
       }
+      this.requestFg();
       return;
     }
-    if (this.selected && (e.key === 'Delete' || e.key === 'Backspace')) {
+    if (this.sel.size && (e.key === 'Delete' || e.key === 'Backspace')) {
       e.preventDefault();
-      this.deleteSelected();
+      this.deleteSelection();
       return;
     }
-    if (e.key === 'Escape' && this.selected) {
-      this.select(null);
-      return;
-    }
-    if (e.key === 'Escape' && ui.tool === 'frame') {
-      useUI.setState({ tool: 'pen' });
-      return;
+    if (e.key === 'Escape') {
+      if (this.angleDraft) {
+        this.angleDraft = null;
+        this.requestFg();
+        return;
+      }
+      if (this.sel.size) return this.setSel([]);
+      if (ui.tool === 'frame' || ui.tool === 'shape') return useUI.setState({ tool: 'pen' });
     }
     const action = matchShortcut(e, ui.shortcuts);
     if (action) {
@@ -896,11 +1235,18 @@ export class Board implements BoardApi {
       this.keys.space = false;
       this.updateCursor();
     }
-    if (e.key === 'Shift') this.keys.shift = false;
+    if (e.key === 'Shift') {
+      this.keys.shift = false;
+      this.requestFg();
+    }
   };
 
   private run(action: Action) {
     const set = useUI.setState;
+    if ((SHAPE_ACTIONS as readonly string[]).includes(action)) {
+      set({ tool: 'shape', shapeKind: action as ShapeKind });
+      return;
+    }
     switch (action) {
       case 'select':
       case 'pen':
@@ -920,6 +1266,10 @@ export class Board implements BoardApi {
       case 'zoomReset': this.zoomReset(); break;
       case 'togglePressure': set({ pressure: !useUI.getState().pressure }); break;
       case 'addPage': this.addPage(); break;
+      case 'selectAll':
+        this.setSel(this.doc.filter((el) => !isFrame(el)).map((el) => el.id));
+        break;
+      case 'duplicate': this.duplicateSelection(); break;
       default: runAppAction(action);
     }
   }
@@ -927,21 +1277,21 @@ export class Board implements BoardApi {
   private updateCursor() {
     const tool = useUI.getState().tool;
     const m = this.mode;
+    const hv = this.hover;
+    const box = !m && hv && this.sel.size ? this.selBox() : null;
     let c = 'crosshair';
-    const sel = this.selectedImage();
     if (m?.kind === 'pan') c = 'grabbing';
-    else if (m?.kind === 'imgMove') c = 'move';
-    else if (m?.kind === 'imgResize') c = 'nwse-resize';
-    else if (!m && sel && this.hover && this.onImageHandle(sel, this.hover.x, this.hover.y)) c = 'nwse-resize';
-    else if (!m && this.hover && ((sel && this.inEl(sel, this.hover.x, this.hover.y)) || (tool === 'select' && this.imageAt(this.hover.x, this.hover.y)))) c = 'move';
-    else if (m?.kind === 'frameResize') c = 'nwse-resize';
-    else if (!m && this.hover && this.handleAt(this.hover.x, this.hover.y)) c = 'nwse-resize';
+    else if (m?.kind === 'selMove') c = 'move';
+    else if (m?.kind === 'selScale' || m?.kind === 'frameResize') c = 'nwse-resize';
+    else if (box && hv && this.onSelHandle(box, hv.x, hv.y)) c = 'nwse-resize';
+    else if (box && hv && this.inBox(box, hv.x, hv.y)) c = 'move';
+    else if (!m && hv && this.handleAt(hv.x, hv.y)) c = 'nwse-resize';
     else if (m?.kind === 'frameDrag') c = m.moved ? 'grabbing' : 'pointer';
     else if (this.keys.space || tool === 'hand') c = 'grab';
-    else if (!m && this.hover && this.labelAt(this.hover.x, this.hover.y)) c = 'move';
+    else if (!m && hv && this.labelAt(hv.x, hv.y)) c = 'move';
     else if (m?.kind === 'erase' || tool === 'eraser') c = 'none';
-    else if (tool === 'frame') c = this.hover && this.frameAt(this.hover.x, this.hover.y) ? 'move' : 'copy';
-    else if (tool === 'select') c = 'default';
+    else if (tool === 'frame') c = hv && this.frameAt(hv.x, hv.y) ? 'move' : 'copy';
+    else if (tool === 'select') c = !m && hv && this.elementAt(hv.x, hv.y) ? 'move' : 'default';
     if (this.fg.style.cursor !== c) this.fg.style.cursor = c;
   }
 
@@ -989,6 +1339,10 @@ export class Board implements BoardApi {
     c.setTransform(k, 0, 0, k, -k * x, -k * y);
   }
 
+  private screenTransform(c: CanvasRenderingContext2D) {
+    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  }
+
   private drawFrameBox(c: CanvasRenderingContext2D, f: Frame) {
     const z = this.cam.z;
     c.fillStyle = 'rgba(31, 95, 209, 0.025)';
@@ -1000,6 +1354,8 @@ export class Board implements BoardApi {
 
   private drawLabel(c: CanvasRenderingContext2D, text: string, sx: number, sy: number) {
     c.font = '600 12px system-ui, "Segoe UI", sans-serif';
+    c.textAlign = 'left';
+    c.textBaseline = 'alphabetic';
     const grip = 14;
     const w = c.measureText(text).width + 12 + grip;
     c.fillStyle = '#e6ecf5';
@@ -1025,10 +1381,23 @@ export class Board implements BoardApi {
     c.stroke();
   }
 
+  /** Ramka zaznaczenia + uchwyt skalowania (w pikselach ekranu). */
+  private drawSelBox(c: CanvasRenderingContext2D, b: BBox) {
+    this.screenTransform(c);
+    const [x0, y0] = this.toScreen(b.minX, b.minY);
+    const [x1, y1] = this.toScreen(b.maxX, b.maxY);
+    c.strokeStyle = '#1f5fd1';
+    c.lineWidth = 1.5;
+    c.setLineDash([6, 4]);
+    c.strokeRect(x0 - 4, y0 - 4, x1 - x0 + 8, y1 - y0 + 8);
+    c.setLineDash([]);
+    this.drawHandle(c, x1, y1);
+  }
+
   private renderBg() {
     const c = this.bctx;
     const { x, y, z } = this.cam;
-    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.screenTransform(c);
     c.fillStyle = '#ffffff';
     c.fillRect(0, 0, this.w, this.h);
 
@@ -1056,34 +1425,33 @@ export class Board implements BoardApi {
     for (const f of frames) {
       if (!this.hidden.has(f.id) && bboxOverlap(elBBox(f), view)) this.drawFrameBox(c, f);
     }
-    // obrazki pod pismem – żeby dało się po nich pisać
-    for (const el of this.doc) {
-      if (isImage(el) && !this.hidden.has(el.id) && bboxOverlap(elBBox(el), view)) this.drawImageEl(c, el);
-    }
-    for (const el of this.doc) {
-      if (isStroke(el) && !this.hidden.has(el.id) && bboxOverlap(strokeBBox(el), view)) drawStroke(c, el);
-    }
+    this.drawEls(c, this.doc.filter((el) => !isFrame(el) && !this.hidden.has(el.id) && bboxOverlap(elBBox(el), view)));
 
     // etykiety stron w pikselach ekranu (stała wielkość niezależnie od zoomu)
-    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.screenTransform(c);
     this.labels = [];
     frames.forEach((f, i) => {
       if (this.hidden.has(f.id) || !bboxOverlap(elBBox(f), view)) return;
       const r = this.drawLabel(c, frameLabel(f, i), (f.x - x) * z, (f.y - y) * z);
       this.labels.push({ id: f.id, ...r });
     });
-    const sel = this.selectedImage();
-    if (!sel) this.selected = null;
-    else if (!this.hidden.has(sel.id)) this.drawSelection(c, sel.x, sel.y, sel.w, sel.h);
-
     this.handles = [];
     for (const f of frames) {
       if (this.hidden.has(f.id) || !bboxOverlap(elBBox(f), view)) continue;
-      const hx = (f.x + f.w - x) * z;
-      const hy = (f.y + f.h - y) * z;
+      const [hx, hy] = this.toScreen(f.x + f.w, f.y + f.h);
       this.drawHandle(c, hx, hy);
       this.handles.push({ id: f.id, x: hx - HANDLE_PX, y: hy - HANDLE_PX, w: HANDLE_PX * 2, h: HANDLE_PX * 2 });
     }
+
+    // zaznaczenie (bez elementów, które zniknęły – np. po cofnięciu)
+    if (this.sel.size) {
+      const ids = new Set(this.doc.map((el) => el.id));
+      this.sel = new Set([...this.sel].filter((id) => ids.has(id)));
+      const b = this.selBox();
+      const m = this.mode;
+      if (b && m?.kind !== 'selMove' && m?.kind !== 'selScale') this.drawSelBox(c, b);
+    }
+    this.publishSelection();
   }
 
   private renderFg() {
@@ -1098,42 +1466,82 @@ export class Board implements BoardApi {
       drawStroke(c, m.stroke, true);
     }
 
+    if (m?.kind === 'shape') {
+      this.worldTransform(c);
+      const s = m.shape;
+      // kąt w pierwszym kroku to po prostu ramię
+      drawInk(c, s.kind === 'angle' ? { ...s, kind: 'line' } : s);
+    }
+
+    // kąt: drugie ramię za kursorem + podgląd miary
+    if (!m && this.angleDraft && this.hover) {
+      const d = this.angleDraft;
+      const b = this.angleEnd(this.hover.x, this.hover.y, this.keys.alt, this.keys.shift);
+      this.worldTransform(c);
+      drawInk(c, { id: '', type: 'shape', kind: 'angle', pts: [d.v, d.a, b], color: d.color, width: d.width });
+      // miara na dwusiecznej, za łukiem
+      this.screenTransform(c);
+      const [vx, vy] = this.toScreen(...d.v);
+      const a1 = Math.atan2(d.a[1] - d.v[1], d.a[0] - d.v[0]);
+      const d0 = Math.atan2(b[1] - d.v[1], b[0] - d.v[0]) - a1;
+      const mid = a1 + Math.atan2(Math.sin(d0), Math.cos(d0)) / 2;
+      const r = 40 * this.cam.z + 22;
+      c.font = '600 13px system-ui, "Segoe UI", sans-serif';
+      c.textAlign = 'center';
+      c.textBaseline = 'middle';
+      c.fillStyle = '#1f5fd1';
+      c.fillText(`${Math.round(angleDegrees(d.v, d.a, b))}°`, vx + Math.cos(mid) * r, vy + Math.sin(mid) * r);
+    }
+
+    if (m?.kind === 'lasso' && m.pts.length > 1) {
+      this.worldTransform(c);
+      c.beginPath();
+      m.pts.forEach(([px, py], i) => (i ? c.lineTo(px, py) : c.moveTo(px, py)));
+      c.closePath();
+      c.fillStyle = 'rgba(31, 95, 209, 0.06)';
+      c.fill();
+      c.setLineDash([6 / this.cam.z, 4 / this.cam.z]);
+      c.strokeStyle = '#1f5fd1';
+      c.lineWidth = 1.2 / this.cam.z;
+      c.stroke();
+      c.setLineDash([]);
+    }
+
+    if (m?.kind === 'selMove' && m.moved) {
+      this.worldTransform(c);
+      c.translate(m.dx, m.dy);
+      this.drawEls(c, m.els);
+      const b = unionBox(m.els)!;
+      this.drawSelBox(c, { minX: b.minX + m.dx, minY: b.minY + m.dy, maxX: b.maxX + m.dx, maxY: b.maxY + m.dy });
+    }
+
+    if (m?.kind === 'selScale') {
+      const scaled = m.els.map((el) => scaleEl(el, m.box.minX, m.box.minY, m.s));
+      this.worldTransform(c);
+      this.drawEls(c, scaled);
+      const b = m.box;
+      this.drawSelBox(c, { minX: b.minX, minY: b.minY, maxX: b.minX + (b.maxX - b.minX) * m.s, maxY: b.minY + (b.maxY - b.minY) * m.s });
+    }
+
     if (m?.kind === 'frameDrag' && m.moved) {
       this.worldTransform(c);
       c.translate(m.dx, m.dy);
       this.drawFrameBox(c, m.frame);
-      for (const el of m.contents) {
-        if (isImage(el)) this.drawImageEl(c, el);
-      }
-      for (const el of m.contents) {
-        if (isStroke(el)) drawStroke(c, el);
-      }
-      c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this.drawEls(c, m.contents);
+      this.screenTransform(c);
       const i = sortFrames(this.doc.filter(isFrame)).findIndex((f) => f.id === m.frame.id);
-      this.drawLabel(c, frameLabel(m.frame, i), (m.frame.x + m.dx - this.cam.x) * this.cam.z, (m.frame.y + m.dy - this.cam.y) * this.cam.z);
-    }
-
-    if (m?.kind === 'imgMove' && m.moved) {
-      this.worldTransform(c);
-      c.translate(m.dx, m.dy);
-      this.drawImageEl(c, m.el);
-      this.drawSelection(c, m.el.x + m.dx, m.el.y + m.dy, m.el.w, m.el.h);
-    }
-    if (m?.kind === 'imgResize') {
-      this.worldTransform(c);
-      this.drawImageEl(c, m.el, m.w, m.h);
-      this.drawSelection(c, m.el.x, m.el.y, m.w, m.h);
+      const [lx, ly] = this.toScreen(m.frame.x + m.dx, m.frame.y + m.dy);
+      this.drawLabel(c, frameLabel(m.frame, i), lx, ly);
     }
 
     if (m?.kind === 'frameResize' && m.moved) {
       const f = { ...m.frame, w: m.w, h: m.h };
       this.worldTransform(c);
       this.drawFrameBox(c, f);
-      c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this.screenTransform(c);
       const i = sortFrames(this.doc.filter(isFrame)).findIndex((fr) => fr.id === f.id);
-      const z = this.cam.z;
-      this.drawLabel(c, frameLabel(f, i), (f.x - this.cam.x) * z, (f.y - this.cam.y) * z);
-      this.drawHandle(c, (f.x + f.w - this.cam.x) * z, (f.y + f.h - this.cam.y) * z);
+      this.drawLabel(c, frameLabel(f, i), ...this.toScreen(f.x, f.y));
+      this.drawHandle(c, ...this.toScreen(f.x + f.w, f.y + f.h));
     }
 
     // podgląd nowej strony pod kursorem
@@ -1150,7 +1558,7 @@ export class Board implements BoardApi {
 
     const showEraser = m?.kind === 'erase' || (!m && ui.tool === 'eraser');
     if (showEraser && this.hover) {
-      c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this.screenTransform(c);
       c.beginPath();
       c.arc(this.hover.x, this.hover.y, ERASER_PX, 0, Math.PI * 2);
       c.fillStyle = 'rgba(120,130,150,0.12)';

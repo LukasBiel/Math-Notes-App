@@ -1,5 +1,6 @@
 import { getStroke } from 'perfect-freehand';
-import { A4, type El, type Frame, type ImageEl, type Stroke } from './types';
+import { A4, type El, type Frame, type ImageEl, type Shape, type Stroke } from './types';
+import { shapeGeometry } from './shapes';
 
 export const GRID = 20;
 
@@ -67,6 +68,42 @@ export function drawStroke(c: CanvasRenderingContext2D, s: Stroke, live = false)
 export const isStroke = (e: El): e is Stroke => e.type === 'stroke';
 export const isFrame = (e: El): e is Frame => e.type === 'frame';
 export const isImage = (e: El): e is ImageEl => e.type === 'image';
+export const isShape = (e: El): e is Shape => e.type === 'shape';
+/** Elementy „atramentowe” – mają kolor, gumka je ściera. */
+export const isInk = (e: El): e is Stroke | Shape => e.type === 'stroke' || e.type === 'shape';
+
+export function drawShape(c: CanvasRenderingContext2D, s: Shape) {
+  const g = shapeGeometry(s);
+  c.strokeStyle = s.color;
+  c.fillStyle = s.color;
+  c.lineWidth = s.width;
+  c.lineCap = 'round';
+  c.lineJoin = 'round';
+  for (const p of g.paths) {
+    c.beginPath();
+    p.pts.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
+    if (p.closed) c.closePath();
+    c.stroke();
+  }
+  for (const f of g.fills) {
+    c.beginPath();
+    f.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
+    c.closePath();
+    c.fill();
+  }
+  for (const t of g.texts) {
+    c.font = `${t.size}px system-ui, "Segoe UI", sans-serif`;
+    c.textAlign = t.align;
+    c.textBaseline = t.baseline;
+    c.fillText(t.text, t.x, t.y);
+  }
+}
+
+/** Kreska albo figura. */
+export function drawInk(c: CanvasRenderingContext2D, e: Stroke | Shape, live = false) {
+  if (e.type === 'shape') drawShape(c, e);
+  else drawStroke(c, e, live);
+}
 
 /** Kolejność stron: wiersze od góry (ramki zachodzące na siebie w pionie to jeden wiersz), w wierszu od lewej. */
 export function sortFrames(frames: Frame[]): Frame[] {

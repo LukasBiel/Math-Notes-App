@@ -41,7 +41,27 @@ export interface ImageEl {
   imageId: string;
 }
 
-export type El = Stroke | Frame | ImageEl;
+export type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle' | 'angle' | 'axes' | 'numberline';
+
+/**
+ * Figura geometryczna. Znaczenie punktów zależy od rodzaju:
+ * line/arrow: [początek, koniec]; rect/ellipse/triangle: [róg, róg przeciwny];
+ * angle: [wierzchołek, ramię 1, ramię 2]; axes: [róg, róg, początek układu]; numberline: [lewy, prawy, zero].
+ */
+export interface Shape {
+  id: string;
+  type: 'shape';
+  kind: ShapeKind;
+  pts: [number, number][];
+  color: string;
+  width: number;
+  /** trójkąt prostokątny (kąt prosty w lewym dolnym rogu) */
+  right?: boolean;
+  /** długość jednostki na osiach (świat) */
+  unit?: number;
+}
+
+export type El = Stroke | Frame | ImageEl | Shape;
 
 /** A4 przy 96 dpi – kratka 20 ≈ 5 mm, jak w zeszycie */
 export const A4 = { portrait: [794, 1123], landscape: [1123, 794] } as const;

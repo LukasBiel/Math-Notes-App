@@ -5,7 +5,9 @@ export type Action =
   | 'zoomIn' | 'zoomOut' | 'zoomReset'
   | 'togglePressure'
   | 'newNote' | 'search' | 'toggleSidebar'
-  | 'frame' | 'addPage' | 'exportPdf';
+  | 'frame' | 'addPage' | 'exportPdf'
+  | 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle' | 'angle' | 'axes' | 'numberline'
+  | 'selectAll' | 'duplicate' | 'importPdf';
 
 export type ShortcutMap = Record<Action, string[]>;
 
@@ -31,7 +33,20 @@ export const ACTION_LABELS: Record<Action, string> = {
   frame: 'Page frame (A4)',
   addPage: 'Add next page',
   exportPdf: 'Export PDF',
+  line: 'Line',
+  arrow: 'Arrow',
+  rect: 'Rectangle',
+  ellipse: 'Circle / ellipse',
+  triangle: 'Triangle',
+  angle: 'Angle',
+  axes: 'Coordinate axes',
+  numberline: 'Number line',
+  selectAll: 'Select all',
+  duplicate: 'Duplicate selection',
+  importPdf: 'Import PDF',
 };
+
+export const SHAPE_ACTIONS = ['line', 'arrow', 'rect', 'ellipse', 'triangle', 'angle', 'axes', 'numberline'] as const;
 
 export const DEFAULT_SHORTCUTS: ShortcutMap = {
   select: ['v'],
@@ -55,6 +70,17 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   frame: ['f'],
   addPage: ['shift+f'],
   exportPdf: ['ctrl+p'],
+  line: ['l'],
+  arrow: ['a'],
+  rect: ['r'],
+  ellipse: ['o'],
+  triangle: ['t'],
+  angle: ['k'],
+  axes: ['x'],
+  numberline: ['n'],
+  selectAll: ['ctrl+a'],
+  duplicate: ['ctrl+d'],
+  importPdf: ['ctrl+o'],
 };
 
 function keyName(e: KeyboardEvent) {

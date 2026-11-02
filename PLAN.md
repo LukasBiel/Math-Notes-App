@@ -13,7 +13,7 @@ Otwarty (nieskończony) notes do odręcznych notatek z matematyki. Web app (PWA)
 | Zapis lokalny | IndexedDB (Dexie), autozapis | Nie trzeba klikać „zapisz” |
 | Synchronizacja | Własny serwer: Hono (Node) + PostgreSQL, logowanie Google, local-first (IndexedDB) | Własny Hetzner + Coolify, bazy zawsze w Postgresie |
 | Hosting | Hetzner + Coolify (Dockerfile), patrz DEPLOY.md | Własna infrastruktura |
-| PDF | Ramki A4 → `jsPDF` + `svg2pdf.js` (wektorowo) | Ostry tekst i linie przy dowolnym powiększeniu wydruku |
+| PDF | Ramki A4 → `jsPDF` (ścieżki wektorowe rysowane bezpośrednio) | Ostry tekst i linie przy dowolnym powiększeniu wydruku |
 
 ## Model danych (skrót)
 
@@ -76,11 +76,11 @@ Każdy etap kończy się czymś, czego można używać i co testujesz na swoim t
 0. **Test tabletu (pół dnia)** — goła strona: rysowanie z naciskiem. Sprawdzamy, czy przeglądarka widzi nacisk z Twojego tabletu, opóźnienie, przycisk/gumkę pióra. To jedyne realne ryzyko techniczne — sprawdzamy je najpierw.
 1. **Rdzeń rysowania** (✔ pierwsza wersja, `npm run dev`) — nieskończone płótno, kratka, pióro z naciskiem i grubością, kolory, gumka kreskowa, Ctrl+Z/Y, przesuwanie i zoom, linia prosta z Shift.
 2. **Zapis i organizacja** (✔ pierwsza wersja: klasy → tematy → notatki, typy notatek, automatyczne nazwy, Alt+N, Ctrl+K, kosz z Undo, przeciąganie między klasami, puste notatki znikają same) — autozapis w przeglądarce, foldery, nazwy, panel boczny, otwieranie ostatniej notatki.
-3. **Online** (✔ kod gotowy, czeka na wdrożenie – DEPLOY.md) — hosting + logowanie + synchronizacja (Postgres na Hetznerze). Od tego momentu wchodzisz z komputera szkolnego.
+3. **Online** (✔ wdrożone na Coolify, logowanie Google działa) — hosting + logowanie + synchronizacja (Postgres na Hetznerze). Od tego momentu wchodzisz z komputera szkolnego.
 4. **Ramki i PDF** (✔ narzędzie strony F, + Page, przeciąganie strony z treścią, nazwy, pion/poziom, eksport wektorowy z miniaturami, Ctrl+P; bez stron – automatyczny podział na A4) — ramki A4, eksport wektorowy.
-5. **Figury i zaznaczanie** — kształty matematyczne, układ współrzędnych, lasso, kopiuj/wklej, prostowanie przez przytrzymanie.
-6. **Wygoda** — edycja skrótów, gumka częściowa, „cofnij serię”, zakreślacz, PWA/offline.
-7. **Dodatki (opcjonalnie)** — wzory LaTeX, wykresy funkcji, linijka/kątomierz, wstawianie obrazków (np. zrzut zadania).
+5. **Figury i zaznaczanie** (✔ odcinek, strzałka, prostokąt, okrąg, trójkąt, kąt z miarą, układ współrzędnych, oś liczbowa; lasso/klik, przesuwanie, skalowanie, kolor, kopiuj/wklej/duplikuj) — zostało: prostowanie przez przytrzymanie.
+6. **Wygoda** — edycja skrótów, gumka częściowa, zakreślacz, PWA/offline. (✔ „cofnij serię” – Alt+Z, zrobione w etapie 1)
+7. **Dodatki (opcjonalnie)** — wzory LaTeX, wykresy funkcji, linijka/kątomierz. (✔ wklejanie obrazków Ctrl+V, zmiana rozmiaru stron, import PDF do pisania po nim – Ctrl+O / przeciągnięcie pliku)
 
 ## Ustalenia
 - Pióro działa jako mysz (bez Windows Ink) – tak jest wygodniej. Domyślnie stała grubość + wygładzanie; nacisk to opcja (przycisk „Nacisk”), działa tylko z Windows Ink

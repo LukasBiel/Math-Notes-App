@@ -1,5 +1,6 @@
 import type { Action } from '../engine/shortcuts';
 import { useUI } from './store';
+import { pickPdfFile } from '../pdf/importPdf';
 
 /** Skróty, które dotyczą aplikacji, a nie samej tablicy. */
 export function runAppAction(action: Action) {
@@ -12,6 +13,9 @@ export function runAppAction(action: Action) {
       break;
     case 'exportPdf':
       useUI.setState({ exportOpen: true, menu: null });
+      break;
+    case 'importPdf':
+      pickPdfFile();
       break;
     case 'toggleSidebar':
       useUI.setState((s) => ({ sidebarOpen: !s.sidebarOpen }));

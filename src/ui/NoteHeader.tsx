@@ -4,6 +4,7 @@ import { db, type NoteKind } from '../data/db';
 import { KINDS, renameNote, sortClasses, updateNote } from '../data/notes';
 import { useUI } from './store';
 import { InlineEdit } from './InlineEdit';
+import { pickPdfFile } from '../pdf/importPdf';
 
 /** Pasek otwartej notatki: typ, nazwa, klasa, temat – wszystko zmienialne jednym klikiem. */
 export function NoteHeader() {
@@ -77,8 +78,11 @@ export function NoteHeader() {
           </select>
 
           <TopicInput key={note.id} value={note.topic} onCommit={(t) => void updateNote(note.id, { topic: t })} />
+          <button className="pdf-btn import" title="Import PDF to write on it (Ctrl+O) – or drop a PDF file on the board" onClick={pickPdfFile}>
+            Import PDF
+          </button>
           <button className="pdf-btn" title="Export PDF (Ctrl+P)" onClick={() => useUI.setState({ exportOpen: true })}>
-            PDF
+            Export PDF
           </button>
         </>
       )}

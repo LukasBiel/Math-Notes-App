@@ -1,8 +1,9 @@
 import { COLORS, useUI, WIDTHS, type Tool } from './store';
+import { ShapesButton } from './ShapesButton';
 import { EraserIcon, HandIcon, LandscapeIcon, PageIcon, PenIcon, PortraitIcon, RedoIcon, SelectIcon, UndoIcon } from './icons';
 
 const TOOLS: { id: Tool; label: string; icon: () => React.JSX.Element }[] = [
-  { id: 'select', label: 'Select (V) – move / resize pasted images, Delete removes', icon: SelectIcon },
+  { id: 'select', label: 'Select (V) – click or draw a lasso around writing; drag to move, corner to scale', icon: SelectIcon },
   { id: 'pen', label: 'Pen (P)', icon: PenIcon },
   { id: 'eraser', label: 'Eraser (E, or right mouse button)', icon: EraserIcon },
   { id: 'hand', label: 'Pan (H, or hold Space)', icon: HandIcon },
@@ -11,6 +12,8 @@ const TOOLS: { id: Tool; label: string; icon: () => React.JSX.Element }[] = [
 export function Toolbar() {
   const s = useUI();
   const set = useUI.setState;
+  // kolor/grubość: przy figurach zostajemy w figurach, inaczej wracamy do pisaka
+  const drawTool = s.tool === 'shape' ? 'shape' : 'pen';
 
   return (
     // po kliknięciu oddajemy fokus, żeby spacja/skróty nie „klikały” przycisków
@@ -21,6 +24,7 @@ export function Toolbar() {
             <t.icon />
           </button>
         ))}
+        <ShapesButton />
       </div>
 
       <div className="group">
@@ -29,7 +33,15 @@ export function Toolbar() {
             key={c}
             className={'swatch' + (s.color === c ? ' active' : '')}
             title={c}
-            onClick={() => set({ color: c, tool: 'pen' })}
+            onClick={() => {
+              // jest zaznaczenie – kolor zmienia zaznaczone
+              if (s.selection?.ink) {
+                s.api?.recolorSelection(c);
+                set({ color: c });
+              } else {
+                set({ color: c, tool: drawTool });
+              }
+            }}
           >
             <span style={{ background: c }} />
           </button>
@@ -42,7 +54,7 @@ export function Toolbar() {
             key={w}
             className={s.width === w ? 'active' : ''}
             title={`Width ${i + 1} (key ${i + 1})`}
-            onClick={() => set({ width: w, tool: 'pen' })}
+            onClick={() => set({ width: w, tool: drawTool })}
           >
             <span className="dot" style={{ width: 3 + i * 3, height: 3 + i * 3, background: s.color }} />
           </button>

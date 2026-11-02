@@ -2,9 +2,11 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ShortcutMap } from '../engine/shortcuts';
 import type { NoteKind } from '../data/db';
-import type { El, Orientation } from '../engine/types';
+import type { El, Orientation, ShapeKind } from '../engine/types';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
+import type { PdfPageImage } from '../pdf/importPdf';
 
-export type Tool = 'select' | 'pen' | 'eraser' | 'hand' | 'frame';
+export type Tool = 'select' | 'pen' | 'eraser' | 'hand' | 'frame' | 'shape';
 
 export const COLORS = ['#1d2433', '#1f5fd1', '#d1302f', '#1f9d55', '#e07b00', '#7b3fc4'];
 export const WIDTHS = [1.5, 3, 6, 12];
@@ -18,6 +20,22 @@ export interface BoardApi {
   addPage(): void;
   getElements(): El[];
   renameFrame(id: string, name: string): void;
+  recolorSelection(color: string): void;
+  duplicateSelection(): void;
+  deleteSelection(): void;
+  copySelection(): void;
+  insertPdfPages(pages: PdfPageImage[]): Promise<void>;
+}
+
+/** Zaznaczenie widoczne na ekranie – do paska z akcjami (współrzędne ekranu tablicy). */
+export interface SelectionUI {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  count: number;
+  /** czy są kreski/figury (można zmienić kolor) */
+  ink: boolean;
 }
 
 export interface MenuItem {
@@ -55,6 +73,7 @@ interface UIState {
   shortcuts: Partial<ShortcutMap>;
   frameOrientation: Orientation;
   pdfGrid: boolean;
+  shapeKind: ShapeKind;
 
   // organizacja (zapisywane)
   currentNoteId: string | null;
@@ -83,6 +102,9 @@ interface UIState {
   sync: SyncStatus;
   /** zwiększane, gdy otwarta notatka zmieniła się na innym komputerze */
   boardReload: number;
+  selection: SelectionUI | null;
+  /** długi PDF czeka na wybór stron */
+  pdfImport: { name: string; count: number; doc: PDFDocumentProxy } | null;
 }
 
 export const useUI = create<UIState>()(
@@ -96,6 +118,7 @@ export const useUI = create<UIState>()(
       shortcuts: {},
       frameOrientation: 'portrait',
       pdfGrid: true,
+      shapeKind: 'line',
 
       currentNoteId: null,
       lastClassId: null,
@@ -118,6 +141,8 @@ export const useUI = create<UIState>()(
       searchFocusTick: 0,
       sync: { state: 'off' },
       boardReload: 0,
+      selection: null,
+      pdfImport: null,
     }),
     {
       name: 'notatnik:v0:ui',
@@ -130,6 +155,7 @@ export const useUI = create<UIState>()(
         shortcuts: s.shortcuts,
         frameOrientation: s.frameOrientation,
         pdfGrid: s.pdfGrid,
+        shapeKind: s.shapeKind,
         currentNoteId: s.currentNoteId,
         lastClassId: s.lastClassId,
         lastKind: s.lastKind,

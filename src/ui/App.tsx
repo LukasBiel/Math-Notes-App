@@ -7,7 +7,9 @@ import { Sidebar } from './Sidebar';
 import { NoteHeader } from './NoteHeader';
 import { NewNoteDialog } from './NewNoteDialog';
 import { ExportDialog } from './ExportDialog';
+import { PdfImportDialog } from './PdfImportDialog';
 import { InlineEdit } from './InlineEdit';
+import { SelectionBar } from './SelectionBar';
 import { ContextMenu, Hints, Toast, TopicDatalist } from './Overlays';
 import { useUI } from './store';
 
@@ -36,9 +38,11 @@ export function App() {
         </div>
         <Hints />
         <FrameNameEdit />
+        <SelectionBar />
       </main>
       <NewNoteDialog />
       <ExportDialog />
+      <PdfImportDialog />
       <ContextMenu />
       <Toast />
       <TopicDatalist />

@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../data/db';
 import { autoPages, buildPdf, pdfFileName, type PageRect } from '../pdf/exportPdf';
-import { drawStroke, frameLabel, GRID, isFrame, isImage, isStroke, sortFrames } from '../engine/render';
-import { bboxOverlap, elBBox, strokeBBox } from '../engine/geometry';
+import { drawInk, frameLabel, GRID, isFrame, isImage, isInk, sortFrames } from '../engine/render';
+import { bboxOverlap, elBBox } from '../engine/geometry';
 import type { El } from '../engine/types';
 import { useUI } from './store';
 
@@ -171,7 +171,7 @@ function Thumb({ els, page, grid, imgs }: { els: El[]; page: PageRect; grid: boo
       const img = imgs?.get(im.imageId);
       if (img && bboxOverlap(elBBox(im), box)) c.drawImage(img, im.x, im.y, im.w, im.h);
     }
-    for (const s of els.filter(isStroke)) if (bboxOverlap(strokeBBox(s), box)) drawStroke(c, s);
+    for (const s of els.filter(isInk)) if (bboxOverlap(elBBox(s), box)) drawInk(c, s);
   }, [els, page, grid, W, H, imgs]);
 
   const dpr = window.devicePixelRatio || 1;
