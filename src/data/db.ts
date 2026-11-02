@@ -31,6 +31,8 @@ export interface NoteMeta extends SyncFields {
   openedAt: number;
   deletedAt: number | null;
   count: number;
+  /** utworzona przez aplikację (np. przy pierwszym starcie), nie przez użytkownika – pusta znika sama */
+  scratch?: boolean;
   cam?: Camera;
 }
 

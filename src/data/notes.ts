@@ -58,6 +58,8 @@ export interface NewNoteOpts {
   kind?: NoteKind;
   topic?: string;
   title?: string;
+  /** notatka „zastępcza” tworzona przez aplikację – pusta znika przy przejściu do innej */
+  scratch?: boolean;
 }
 
 export async function createNote(opts: NewNoteOpts = {}) {
@@ -79,6 +81,7 @@ export async function createNote(opts: NewNoteOpts = {}) {
     openedAt: now,
     deletedAt: null,
     count: 0,
+    ...(opts.scratch ? { scratch: true } : {}),
   };
   await db.transaction('rw', db.notes, db.docs, async () => {
     await db.notes.add(note);
@@ -94,9 +97,10 @@ export async function openNote(id: string) {
   const prev = ui.currentNoteId;
   if (prev === id) return;
   // pusta notatka z automatyczną nazwą znika sama – nie zaśmieca listy
+  // tylko notatka utworzona przez aplikację – te dodane przez użytkownika zostają, nawet puste
   if (prev && ui.boardCount === 0) {
     const p = await db.notes.get(prev);
-    if (p && p.autoTitle && !p.deletedAt) await purgeNote(prev);
+    if (p && p.scratch && p.autoTitle && !p.deletedAt) await purgeNote(prev);
   }
   await db.notes.update(id, { openedAt: Date.now() });
   useUI.setState({ currentNoteId: id, boardCount: -1 });
@@ -105,7 +109,7 @@ export async function openNote(id: string) {
 export async function updateNote(id: string, patch: Partial<Pick<NoteMeta, 'classId' | 'topic' | 'kind'>>) {
   const n = await db.notes.get(id);
   if (!n) return;
-  const next = { ...n, ...patch };
+  const next = { ...n, ...patch, scratch: false }; // użyta świadomie – już nie znika sama
   if (patch.topic !== undefined) next.topic = patch.topic.trim();
   if (next.autoTitle) next.title = makeTitle(next.kind, next.topic, next.createdAt);
   await db.notes.put(next);
@@ -117,7 +121,7 @@ export async function renameNote(id: string, title: string) {
   const n = await db.notes.get(id);
   if (!n) return;
   const t = title.trim();
-  await db.notes.update(id, t ? { title: t, autoTitle: false } : { autoTitle: true, title: makeTitle(n.kind, n.topic, n.createdAt) });
+  await db.notes.update(id, t ? { title: t, autoTitle: false, scratch: false } : { autoTitle: true, title: makeTitle(n.kind, n.topic, n.createdAt) });
 }
 
 export async function saveNoteContent(id: string, elements: El[], cam: Camera, contentChanged: boolean) {
@@ -144,6 +148,7 @@ export async function duplicateNote(id: string) {
     updatedAt: now,
     openedAt: now,
     deletedAt: null,
+    scratch: false,
   };
   await db.transaction('rw', db.notes, db.docs, async () => {
     await db.notes.add(copy);
@@ -185,7 +190,7 @@ export async function openFallback(exceptId: string) {
   rest.sort((a, b) => b.openedAt - a.openedAt);
   useUI.setState({ boardCount: -1 }); // nie kasuj właśnie usuniętej notatki
   if (rest[0]) await openNote(rest[0].id);
-  else await createNote({ classId: null });
+  else await createNote({ classId: null, scratch: true });
 }
 
 // ---------- klasy ----------

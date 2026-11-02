@@ -20,6 +20,8 @@ export function Sidebar() {
   const collapsed = useUI((s) => s.collapsed);
   const [q, setQ] = useState('');
   const [addingClass, setAddingClass] = useState(false);
+  // każde kliknięcie „+” montuje pole od nowa → zawsze dostaje kursor
+  const [addKey, setAddKey] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -92,21 +94,21 @@ export function Sidebar() {
             <Section
               title="Classes"
               action={
-                <button className="icon-btn" title="Add class" onClick={() => setAddingClass(true)}>
+                <button
+                  className="icon-btn"
+                  title="Add class"
+                  onClick={() => {
+                    setAddingClass(true);
+                    setAddKey((k) => k + 1);
+                  }}
+                >
                   +
                 </button>
               }
             >
               {(addingClass || classes.length === 0) && (
                 <div className="add-class">
-                  <InlineEdit
-                    value=""
-                    placeholder="e.g. 7A, 7B, 8C"
-                    onDone={(v) => {
-                      setAddingClass(false);
-                      if (v) void addClasses(v);
-                    }}
-                  />
+                  <AddClassInput key={addKey} autoFocus={addKey > 0} onClose={() => setAddingClass(false)} />
                   {classes.length === 0 && <div className="empty">Add your classes – comma separated.</div>}
                 </div>
               )}
@@ -164,6 +166,34 @@ export function Sidebar() {
       </div>
       <Account />
     </aside>
+  );
+}
+
+/** Pole „dodaj klasy”: Enter albo wyjście z pola dodaje wpisane klasy (po przecinku), Escape zamyka. */
+function AddClassInput({ autoFocus, onClose }: { autoFocus: boolean; onClose: () => void }) {
+  const [v, setV] = useState('');
+  const commit = () => {
+    if (v.trim()) void addClasses(v);
+    setV('');
+    onClose();
+  };
+  return (
+    <input
+      className="inline-edit"
+      autoFocus={autoFocus}
+      value={v}
+      placeholder="e.g. 7A, 7B, 8C"
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') {
+          setV('');
+          onClose();
+        }
+      }}
+    />
   );
 }
 
