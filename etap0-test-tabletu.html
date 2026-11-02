@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Test tabletu</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font: 14px system-ui, sans-serif; }
+  canvas { position: fixed; inset: 0; touch-action: none; cursor: crosshair;
+    background-color: #fff;
+    background-image: linear-gradient(#dfe7f1 1px, transparent 1px), linear-gradient(90deg, #dfe7f1 1px, transparent 1px);
+    background-size: 20px 20px; }
+  #panel { position: fixed; top: 12px; right: 12px; width: 300px; background: #fffffff2;
+    border: 1px solid #ccd; border-radius: 8px; padding: 12px; box-shadow: 0 2px 10px #0002; }
+  #panel h3 { margin: 0 0 8px; font-size: 15px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 2px 0; } td:last-child { text-align: right; font-family: ui-monospace, monospace; }
+  .ok { color: #187a2f; font-weight: 600; } .bad { color: #b3261e; font-weight: 600; }
+  #verdict { margin-top: 10px; padding: 8px; border-radius: 6px; background: #f3f4f8; line-height: 1.4; }
+  label { display: block; margin-top: 8px; }
+  button { margin-top: 10px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <h3>Test tabletu</h3>
+  <table>
+    <tr><td>Urządzenie</td><td id="type">—</td></tr>
+    <tr><td>Nacisk teraz</td><td id="pressure">—</td></tr>
+    <tr><td>Nacisk min / max</td><td id="range">—</td></tr>
+    <tr><td>Przyciski (buttons)</td><td id="buttons">—</td></tr>
+    <tr><td>Nachylenie X / Y</td><td id="tilt">—</td></tr>
+    <tr><td>Próbkowanie</td><td id="rate">—</td></tr>
+    <tr><td>Punkty / zdarzenie</td><td id="coal">—</td></tr>
+  </table>
+  <label>Grubość max: <input id="width" type="range" min="1" max="30" value="8"> <span id="wv">8</span></label>
+  <label><input id="usePressure" type="checkbox" checked> używaj nacisku</label>
+  <div id="verdict">Narysuj kilka kresek piórem: lekko i mocno. Wciśnij też przyciski na piórze, dotykając i nie dotykając tabletu.</div>
+  <button id="clear">Wyczyść</button>
+</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const $ = id => document.getElementById(id);
+function resize() {
+  const dpr = devicePixelRatio || 1;
+  c.width = innerWidth * dpr; c.height = innerHeight * dpr;
+  c.style.width = innerWidth + 'px'; c.style.height = innerHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.lineCap = 'round';
+}
+resize(); addEventListener('resize', resize);
+
+let last = null, minP = 1, maxP = 0, sawPen = false, distinctP = new Set();
+let times = [], buttonsSeen = new Set();
+
+$('width').oninput = e => $('wv').textContent = e.target.value;
+$('clear').onclick = () => ctx.clearRect(0, 0, c.width, c.height);
+c.addEventListener('contextmenu', e => e.preventDefault());
+
+function info(e) {
+  $('type').textContent = e.pointerType;
+  $('pressure').textContent = e.pressure.toFixed(3);
+  $('buttons').textContent = e.buttons + (e.button >= 0 ? ` (button ${e.button})` : '');
+  $('tilt').textContent = `${e.tiltX} / ${e.tiltY}`;
+  if (e.buttons) buttonsSeen.add(e.buttons);
+}
+
+function verdict() {
+  const v = $('verdict');
+  if (!sawPen) {
+    v.innerHTML = '<span class="bad">Przeglądarka widzi „mysz”, nie pióro.</span> W sterowniku Huion (HuionTablet) włącz <b>Windows Ink</b> i zrestartuj przeglądarkę.';
+    return;
+  }
+  const varied = maxP - minP > 0.3 && distinctP.size > 20;
+  v.innerHTML = varied
+    ? `<span class="ok">Nacisk działa ✔</span> (${distinctP.size} różnych wartości)<br>Przyciski widziane: ${[...buttonsSeen].join(', ') || '—'}`
+    : '<span class="bad">Pióro wykryte, ale nacisk się nie zmienia.</span> Sprawdź Windows Ink w sterowniku Huion i spróbuj rysować raz lekko, raz mocno.';
+}
+
+c.addEventListener('pointerdown', e => {
+  c.setPointerCapture(e.pointerId);
+  info(e);
+  last = { x: e.clientX, y: e.clientY, p: e.pressure };
+});
+c.addEventListener('pointermove', e => {
+  info(e);
+  if (e.pointerType === 'pen') sawPen = true;
+  const now = performance.now();
+  times.push(now); while (times.length && now - times[0] > 1000) times.shift();
+  $('rate').textContent = times.length + ' Hz';
+  if (!last || !e.buttons) return;
+  const pts = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  $('coal').textContent = pts.length;
+  const maxW = +$('width').value, useP = $('usePressure').checked;
+  ctx.strokeStyle = e.buttons & 2 ? '#c33' : e.buttons & 32 ? '#999' : '#1a2b4c';
+  for (const p of pts) {
+    if (p.pointerType === 'pen' && p.pressure > 0) {
+      minP = Math.min(minP, p.pressure); maxP = Math.max(maxP, p.pressure);
+      distinctP.add(p.pressure.toFixed(3));
+    }
+    $('range').textContent = `${minP.toFixed(2)} / ${maxP.toFixed(2)}`;
+    const pr = useP ? (p.pressure + last.p) / 2 : 0.5;
+    ctx.lineWidth = Math.max(0.5, maxW * pr * (useP ? 1 : 2));
+    ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.clientX, p.clientY); ctx.stroke();
+    last = { x: p.clientX, y: p.clientY, p: p.pressure };
+  }
+});
+const end = e => { info(e); last = null; verdict(); };
+c.addEventListener('pointerup', end);
+c.addEventListener('pointercancel', end);
+</script>
+</body>
+</html>
