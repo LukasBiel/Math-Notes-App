@@ -28,7 +28,7 @@ export function Toolbar() {
         <ShapesButton />
         <button
           className={s.tool === 'compass' ? 'active' : ''}
-          title="Compass (C) – drag from the center to set the radius, then draw arcs along the dotted circle; click elsewhere to move the needle with the same radius"
+          title="Compass (C) – drag: draw arc · Shift+drag: new needle point and radius · Ctrl+click: move the needle (same radius) · Esc: put the compass away"
           onClick={() => set({ tool: 'compass' })}
         >
           <CompassIcon />

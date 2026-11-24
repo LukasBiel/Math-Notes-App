@@ -141,7 +141,7 @@ export class Board implements BoardApi {
   private left = 0;
   private top = 0;
   private mode: Mode | null = null;
-  private keys = { space: false, shift: false, alt: false };
+  private keys = { space: false, shift: false, alt: false, ctrl: false };
   private hover: { x: number; y: number } | null = null;
   /** etykiety ramek na ekranie – do klikania i przeciągania */
   private labels: LabelRect[] = [];
@@ -209,7 +209,7 @@ export class Board implements BoardApi {
     this.listen(window, 'keydown', this.onKeyDown);
     this.listen(window, 'keyup', this.onKeyUp);
     this.listen(window, 'blur', () => {
-      this.keys.space = this.keys.shift = this.keys.alt = false;
+      this.keys.space = this.keys.shift = this.keys.alt = this.keys.ctrl = false;
       this.updateCursor();
     });
     this.listen(window, 'pagehide', () => this.flushSave());
@@ -936,18 +936,23 @@ export class Board implements BoardApi {
     }
 
     if (e.button === 0 && ui.tool === 'compass') {
-      this.fg.setPointerCapture(id);
       const k = this.compass;
-      if (k) {
-        // blisko okręgu = rysuj łuk; gdzie indziej = nowe wbicie nóżki
+      // Jasny podział czynności:
+      //   przeciąganie         = rysuj łuk (gdziekolwiek – liczy się kąt wokół nóżki)
+      //   Shift + przeciąganie = nowe wbicie nóżki i nowy rozstaw
+      //   Ctrl + klik          = przenieś nóżkę, rozstaw bez zmian
+      if (k && (e.ctrlKey || e.metaKey)) {
+        this.compass = { c: this.shapePoint(sx, sy, e.altKey), r: k.r };
+        this.requestFg();
+        return;
+      }
+      this.fg.setPointerCapture(id);
+      if (k && !e.shiftKey) {
         const [wx, wy] = this.toWorld(sx, sy);
-        const d = Math.hypot(wx - k.c[0], wy - k.c[1]) * this.cam.z;
-        if (Math.abs(d - k.r * this.cam.z) <= Math.max(22, k.r * this.cam.z * 0.25)) {
-          const a0 = Math.atan2(wy - k.c[1], wx - k.c[0]);
-          this.mode = { kind: 'compassArc', a0, last: a0, sweep: 0, pointerId: id };
-          this.requestFg();
-          return;
-        }
+        const a0 = Math.atan2(wy - k.c[1], wx - k.c[0]);
+        this.mode = { kind: 'compassArc', a0, last: a0, sweep: 0, pointerId: id };
+        this.requestFg();
+        return;
       }
       const c = this.shapePoint(sx, sy, e.altKey);
       this.mode = { kind: 'compassSet', c, p: c, pointerId: id };
@@ -1008,6 +1013,7 @@ export class Board implements BoardApi {
     const [sx, sy] = this.screenOf(e);
     this.hover = { x: sx, y: sy };
     this.keys.alt = e.altKey;
+    this.keys.ctrl = e.ctrlKey || e.metaKey;
     const m = this.mode;
 
     if (!m || m.pointerId !== e.pointerId) {
@@ -1277,6 +1283,11 @@ export class Board implements BoardApi {
   private onKeyDown = (e: KeyboardEvent) => {
     const ui = useUI.getState();
     if (isTyping(e.target) || ui.newNote.open || ui.exportOpen) return;
+    if (e.key === 'Control' || e.key === 'Meta') {
+      this.keys.ctrl = true;
+      if (ui.tool === 'compass') this.requestFg();
+      return;
+    }
     if (e.code === 'Space') {
       e.preventDefault();
       if (!this.keys.space) {
@@ -1330,6 +1341,10 @@ export class Board implements BoardApi {
     }
     if (e.key === 'Shift') {
       this.keys.shift = false;
+      this.requestFg();
+    }
+    if (e.key === 'Control' || e.key === 'Meta') {
+      this.keys.ctrl = false;
       this.requestFg();
     }
   };
@@ -1633,34 +1648,60 @@ export class Board implements BoardApi {
       c.setLineDash([]);
       this.drawCompassFigure(c, m.c, m.p);
       if (r > 1) this.radiusLabel(c, m.c, m.p, r);
+      this.cursorHint(c, 'Release to set the radius');
       return;
     }
     const k = this.compass;
+    const crosshair = () => {
+      if (!this.hover) return;
+      this.screenTransform(c);
+      const p = this.snapHit ? this.toScreen(...this.snapHit) : [this.hover.x, this.hover.y];
+      c.strokeStyle = '#3d4557';
+      c.lineWidth = 1.5;
+      c.beginPath();
+      c.moveTo(p[0] - 7, p[1]);
+      c.lineTo(p[0] + 7, p[1]);
+      c.moveTo(p[0], p[1] - 7);
+      c.lineTo(p[0], p[1] + 7);
+      c.stroke();
+    };
+    const guide = (center: P, alpha: number) => {
+      // okrąg orientacyjny (kropkowany) – tu rysuje ołówek
+      this.worldTransform(c);
+      c.setLineDash([2 / this.cam.z, 6 / this.cam.z]);
+      c.strokeStyle = `rgba(31, 95, 209, ${alpha})`;
+      c.lineWidth = 1.2 / this.cam.z;
+      c.beginPath();
+      c.arc(center[0], center[1], k!.r, 0, Math.PI * 2);
+      c.stroke();
+      c.setLineDash([]);
+    };
     if (!k) {
       // jeszcze nie ustawiony: tu wbijesz nóżkę
-      if (this.hover) {
-        this.screenTransform(c);
-        const p = this.snapHit ? this.toScreen(...this.snapHit) : [this.hover.x, this.hover.y];
-        c.strokeStyle = '#3d4557';
-        c.lineWidth = 1.5;
-        c.beginPath();
-        c.moveTo(p[0] - 7, p[1]);
-        c.lineTo(p[0] + 7, p[1]);
-        c.moveTo(p[0], p[1] - 7);
-        c.lineTo(p[0], p[1] + 7);
-        c.stroke();
-      }
+      crosshair();
+      this.cursorHint(c, 'Drag from the needle point to set the radius');
       return;
     }
-    // okrąg orientacyjny (kropkowany) – tu rysuje ołówek
-    this.worldTransform(c);
-    c.setLineDash([2 / this.cam.z, 6 / this.cam.z]);
-    c.strokeStyle = 'rgba(31, 95, 209, 0.35)';
-    c.lineWidth = 1.2 / this.cam.z;
-    c.beginPath();
-    c.arc(k.c[0], k.c[1], k.r, 0, Math.PI * 2);
-    c.stroke();
-    c.setLineDash([]);
+    if (m?.kind !== 'compassArc' && this.hover) {
+      if (this.keys.ctrl) {
+        // Ctrl: podgląd cyrkla przeniesionego w nowe miejsce (ten sam rozstaw)
+        const nc: P = this.snapHit ?? this.toWorld(this.hover.x, this.hover.y);
+        guide(k.c, 0.15);
+        guide(nc, 0.45);
+        this.drawCompassFigure(c, nc, [nc[0] + k.r, nc[1]]);
+        this.radiusLabel(c, nc, [nc[0] + k.r, nc[1]], k.r);
+        this.cursorHint(c, 'Click: move the needle here (same radius)', '#e07b00');
+        return;
+      }
+      if (this.keys.shift) {
+        // Shift: nowe wbicie i nowy rozstaw
+        guide(k.c, 0.15);
+        crosshair();
+        this.cursorHint(c, 'Drag: new needle point + new radius', '#e07b00');
+        return;
+      }
+    }
+    guide(k.c, 0.35);
 
     let ang = 0;
     if (m?.kind === 'compassArc') {
@@ -1674,6 +1715,31 @@ export class Board implements BoardApi {
     const tip: P = [k.c[0] + Math.cos(ang) * k.r, k.c[1] + Math.sin(ang) * k.r];
     this.drawCompassFigure(c, k.c, tip);
     this.radiusLabel(c, k.c, tip, k.r);
+    if (m?.kind !== 'compassArc') this.cursorHint(c, 'Drag: draw arc  ·  Shift: new radius  ·  Ctrl: move needle');
+  }
+
+  /** Mała podpowiedź przy kursorze: co zrobi teraz kliknięcie / przeciągnięcie. */
+  private cursorHint(c: CanvasRenderingContext2D, text: string, color = '#3d4557') {
+    if (!this.hover) return;
+    this.screenTransform(c);
+    c.font = '500 12px system-ui, "Segoe UI", sans-serif';
+    c.textAlign = 'left';
+    c.textBaseline = 'middle';
+    const w = c.measureText(text).width + 14;
+    let x = this.hover.x + 16, y = this.hover.y + 24;
+    if (x + w > this.w - 4) x = this.hover.x - 16 - w;
+    if (y + 12 > this.h - 4) y = this.hover.y - 24;
+    c.globalAlpha = 0.92;
+    c.fillStyle = '#fff';
+    c.strokeStyle = color;
+    c.lineWidth = 1;
+    c.beginPath();
+    c.roundRect(x, y - 11, w, 22, 6);
+    c.fill();
+    c.stroke();
+    c.globalAlpha = 1;
+    c.fillStyle = color;
+    c.fillText(text, x + 7, y);
   }
 
   private renderFg() {
