@@ -5,6 +5,7 @@ import { History, type Op } from './history';
 import { isTyping, matchShortcut, SHAPE_ACTIONS, type Action } from './shortcuts';
 import { drawInk, drawStroke, frameLabel, frameScale, GRID, isFrame, isImage, isInk, sortFrames } from './render';
 import { angleDegrees } from './shapes';
+import { keyPoints, nearestKeyPoint } from './snap';
 import { prepareImage } from './images';
 import { startPdfImport, type PdfPageImage } from '../pdf/importPdf';
 import { useUI, WIDTHS, type BoardApi, type SelectionUI } from '../ui/store';
@@ -46,6 +47,8 @@ const AXIS_UNIT = 2 * GRID;
 /** schowek wewnętrzny (kopiuj/wklej zaznaczenia, także między notatkami) */
 const CLIP_KEY = 'notatnik:clip';
 const CLIP_PREFIX = 'math-notes-clip:';
+/** zasięg przyciągania do punktów (piksele ekranu) */
+const SNAP_PX = 12;
 
 type Mode =
   | { kind: 'draw'; stroke: Stroke; t0: number; pointerId: number }
@@ -53,6 +56,8 @@ type Mode =
   | { kind: 'pan'; sx: number; sy: number; cx: number; cy: number; pointerId: number }
   | { kind: 'shape'; shape: Shape; start: P; pointerId: number }
   | { kind: 'lasso'; pts: P[]; additive: boolean; pointerId: number }
+  | { kind: 'compassSet'; c: P; p: P; pointerId: number }
+  | { kind: 'compassArc'; a0: number; last: number; sweep: number; pointerId: number }
   | { kind: 'selMove'; els: El[]; sx: number; sy: number; dx: number; dy: number; moved: boolean; pointerId: number }
   | { kind: 'selScale'; els: El[]; box: BBox; s: number; pointerId: number }
   | { kind: 'frameResize'; frame: Frame; sx: number; w: number; h: number; moved: boolean; pointerId: number }
@@ -91,7 +96,14 @@ function scaleEl<T extends El>(e: T, ax: number, ay: number, s: number): T {
   const X = (x: number) => r2(ax + (x - ax) * s);
   const Y = (y: number) => r2(ay + (y - ay) * s);
   if (e.type === 'stroke') return { ...e, width: r2(e.width * s), points: e.points.map(([x, y, p]): Point => [X(x), Y(y), p]) };
-  if (e.type === 'shape') return { ...e, width: r2(e.width * s), unit: e.unit && r2(e.unit * s), pts: e.pts.map(([x, y]): P => [X(x), Y(y)]) };
+  if (e.type === 'shape')
+    return {
+      ...e,
+      width: r2(e.width * s),
+      unit: e.unit && r2(e.unit * s),
+      arc: e.arc && { ...e.arc, r: r2(e.arc.r * s) },
+      pts: e.pts.map(([x, y]): P => [X(x), Y(y)]),
+    };
   return { ...e, x: X(e.x), y: Y(e.y), w: r2(e.w * s), h: r2(e.h * s) };
 }
 
@@ -141,6 +153,12 @@ export class Board implements BoardApi {
   private sel = new Set<string>();
   /** kąt w trakcie rysowania: po pierwszym ramieniu czekamy na kliknięcie drugiego */
   private angleDraft: { v: P; a: P; color: string; width: number } | null = null;
+  /** ustawiony cyrkiel: nóżka (środek) i rozstaw */
+  private compass: { c: P; r: number } | null = null;
+  /** punkty kluczowe do przyciągania (przecięcia itd.) – liczone na żądanie */
+  private snapCache: P[] | null = null;
+  /** punkt, do którego właśnie przyciągnęło – pokazujemy kółeczko */
+  private snapHit: P | null = null;
   /** ile razy wklejono ten sam schowek – kolejne wklejenia przesuwamy */
   private pasteCount = new Map<string, number>();
   private images: ImageStore;
@@ -205,6 +223,7 @@ export class Board implements BoardApi {
 
     const unsub = useUI.subscribe((s, prev) => {
       if (s.tool !== prev.tool || s.shapeKind !== prev.shapeKind) this.angleDraft = null;
+      if (s.showGrid !== prev.showGrid) this.requestBg();
       if (s.tool !== prev.tool || s.frameOrientation !== prev.frameOrientation || s.shapeKind !== prev.shapeKind) {
         this.updateCursor();
         this.requestFg();
@@ -423,6 +442,7 @@ export class Board implements BoardApi {
 
   private changed() {
     this.contentDirty = true;
+    this.snapCache = null;
     this.requestBg();
     this.syncUI();
     this.scheduleSave();
@@ -726,10 +746,21 @@ export class Board implements BoardApi {
 
   // ---------- figury ----------
 
-  /** Punkt figury: przyciągnięty do kratki (przy dużym zoomie do pół kratki), z Altem swobodnie. */
+  /**
+   * Punkt figury/cyrkla: najpierw przyciąga do punktów konstrukcji (końce, środki, przecięcia),
+   * potem do kratki (gdy widoczna; przy dużym zoomie co pół kratki). Z Altem – swobodnie.
+   */
   private shapePoint(sx: number, sy: number, free: boolean): P {
     const [x, y] = this.toWorld(sx, sy);
+    this.snapHit = null;
     if (free) return [r2(x), r2(y)];
+    this.snapCache ??= keyPoints(this.doc);
+    const key = nearestKeyPoint(this.snapCache, x, y, SNAP_PX / this.cam.z);
+    if (key) {
+      this.snapHit = key;
+      return [key[0], key[1]];
+    }
+    if (!useUI.getState().showGrid) return [r2(x), r2(y)];
     const step = this.cam.z >= 3 ? GRID / 2 : GRID;
     return [Math.round(x / step) * step, Math.round(y / step) * step];
   }
@@ -757,6 +788,8 @@ export class Board implements BoardApi {
       }
       case 'numberline':
         return { pts: [a, [b[0], a[1]], [snap((a[0] + b[0]) / 2), a[1]]] };
+      case 'arc':
+        return { pts: [a, b] };
     }
   }
 
@@ -902,6 +935,26 @@ export class Board implements BoardApi {
       return;
     }
 
+    if (e.button === 0 && ui.tool === 'compass') {
+      this.fg.setPointerCapture(id);
+      const k = this.compass;
+      if (k) {
+        // blisko okręgu = rysuj łuk; gdzie indziej = nowe wbicie nóżki
+        const [wx, wy] = this.toWorld(sx, sy);
+        const d = Math.hypot(wx - k.c[0], wy - k.c[1]) * this.cam.z;
+        if (Math.abs(d - k.r * this.cam.z) <= Math.max(22, k.r * this.cam.z * 0.25)) {
+          const a0 = Math.atan2(wy - k.c[1], wx - k.c[0]);
+          this.mode = { kind: 'compassArc', a0, last: a0, sweep: 0, pointerId: id };
+          this.requestFg();
+          return;
+        }
+      }
+      const c = this.shapePoint(sx, sy, e.altKey);
+      this.mode = { kind: 'compassSet', c, p: c, pointerId: id };
+      this.requestFg();
+      return;
+    }
+
     if (e.button === 0 && ui.tool === 'shape') {
       // kąt, drugie kliknięcie: drugie ramię
       if (ui.shapeKind === 'angle' && this.angleDraft) {
@@ -959,7 +1012,8 @@ export class Board implements BoardApi {
 
     if (!m || m.pointerId !== e.pointerId) {
       const tool = useUI.getState().tool;
-      if (tool === 'eraser' || tool === 'frame' || this.angleDraft) this.requestFg();
+      if (tool === 'compass' || tool === 'shape') this.shapePoint(sx, sy, e.altKey); // kółeczko przyciągania
+      if (tool === 'eraser' || tool === 'frame' || tool === 'compass' || tool === 'shape' || this.angleDraft) this.requestFg();
       this.updateCursor();
       return;
     }
@@ -967,6 +1021,24 @@ export class Board implements BoardApi {
     if (m.kind === 'pan') {
       this.cam = { ...this.cam, x: m.cx - (sx - m.sx) / this.cam.z, y: m.cy - (sy - m.sy) / this.cam.z };
       this.requestBg();
+      return;
+    }
+
+    if (m.kind === 'compassSet') {
+      m.p = this.shapePoint(sx, sy, e.altKey);
+      this.requestFg();
+      return;
+    }
+
+    if (m.kind === 'compassArc') {
+      if (!this.compass) return;
+      const [wx, wy] = this.toWorld(sx, sy);
+      const ang = Math.atan2(wy - this.compass.c[1], wx - this.compass.c[0]);
+      const d = ang - m.last;
+      m.sweep += Math.atan2(Math.sin(d), Math.cos(d));
+      m.sweep = Math.max(-Math.PI * 2, Math.min(Math.PI * 2, m.sweep));
+      m.last = ang;
+      this.requestFg();
       return;
     }
 
@@ -1073,6 +1145,22 @@ export class Board implements BoardApi {
       this.pushOp({ kind: 'add', els: [s], t0: m.t0, t1 });
     } else if (m.kind === 'erase') {
       if (m.items.length) this.pushOp({ kind: 'remove', items: m.items, t0: m.t0, t1 });
+    } else if (m.kind === 'compassSet') {
+      const r = Math.hypot(m.p[0] - m.c[0], m.p[1] - m.c[1]);
+      if (r >= GRID / 4) this.compass = { c: m.c, r };
+      // samo kliknięcie: przenieś nóżkę, rozstaw bez zmian (jak w konstrukcjach)
+      else if (this.compass) this.compass = { c: m.c, r: this.compass.r };
+    } else if (m.kind === 'compassArc') {
+      const k = this.compass;
+      if (k && Math.abs(m.sweep) > 0.03) {
+        const ui = useUI.getState();
+        this.addEls([
+          {
+            id: this.newId(), type: 'shape', kind: 'arc', pts: [k.c], color: ui.color, width: ui.width,
+            arc: { r: r2(k.r), a0: m.a0, sweep: Math.abs(m.sweep) > Math.PI * 2 - 0.05 ? Math.PI * 2 : m.sweep },
+          },
+        ]);
+      }
     } else if (m.kind === 'shape') {
       const [a, b] = m.shape.pts;
       const big = Math.hypot(b[0] - a[0], b[1] - a[1]) >= GRID / 2;
@@ -1220,7 +1308,12 @@ export class Board implements BoardApi {
         return;
       }
       if (this.sel.size) return this.setSel([]);
-      if (ui.tool === 'frame' || ui.tool === 'shape') return useUI.setState({ tool: 'pen' });
+      if (ui.tool === 'compass' && this.compass) {
+        this.compass = null;
+        this.requestFg();
+        return;
+      }
+      if (ui.tool === 'frame' || ui.tool === 'shape' || ui.tool === 'compass') return useUI.setState({ tool: 'pen' });
     }
     const action = matchShortcut(e, ui.shortcuts);
     if (action) {
@@ -1253,6 +1346,7 @@ export class Board implements BoardApi {
       case 'eraser':
       case 'hand':
       case 'frame':
+      case 'compass':
         set({ tool: action });
         break;
       case 'undo': this.undo(); break;
@@ -1270,6 +1364,11 @@ export class Board implements BoardApi {
         this.setSel(this.doc.filter((el) => !isFrame(el)).map((el) => el.id));
         break;
       case 'duplicate': this.duplicateSelection(); break;
+      case 'toggleGrid': {
+        const g = !useUI.getState().showGrid;
+        set({ showGrid: g, pdfGrid: g });
+        break;
+      }
       default: runAppAction(action);
     }
   }
@@ -1292,6 +1391,7 @@ export class Board implements BoardApi {
     else if (m?.kind === 'erase' || tool === 'eraser') c = 'none';
     else if (tool === 'frame') c = hv && this.frameAt(hv.x, hv.y) ? 'move' : 'copy';
     else if (tool === 'select') c = !m && hv && this.elementAt(hv.x, hv.y) ? 'move' : 'default';
+    else if (tool === 'compass') c = 'none';
     if (this.fg.style.cursor !== c) this.fg.style.cursor = c;
   }
 
@@ -1401,23 +1501,25 @@ export class Board implements BoardApi {
     c.fillStyle = '#ffffff';
     c.fillRect(0, 0, this.w, this.h);
 
-    // kratka – przy dużym oddaleniu rzadsza
-    let step = GRID;
-    while (step * z < 12) step *= 5;
-    c.strokeStyle = '#dbe4ef';
-    c.lineWidth = 1;
-    c.beginPath();
-    for (let wx = Math.floor(x / step) * step; (wx - x) * z <= this.w; wx += step) {
-      const sx = Math.round((wx - x) * z) + 0.5;
-      c.moveTo(sx, 0);
-      c.lineTo(sx, this.h);
+    // kratka (można wyłączyć) – przy dużym oddaleniu rzadsza
+    if (useUI.getState().showGrid) {
+      let step = GRID;
+      while (step * z < 12) step *= 5;
+      c.strokeStyle = '#dbe4ef';
+      c.lineWidth = 1;
+      c.beginPath();
+      for (let wx = Math.floor(x / step) * step; (wx - x) * z <= this.w; wx += step) {
+        const sx = Math.round((wx - x) * z) + 0.5;
+        c.moveTo(sx, 0);
+        c.lineTo(sx, this.h);
+      }
+      for (let wy = Math.floor(y / step) * step; (wy - y) * z <= this.h; wy += step) {
+        const sy = Math.round((wy - y) * z) + 0.5;
+        c.moveTo(0, sy);
+        c.lineTo(this.w, sy);
+      }
+      c.stroke();
     }
-    for (let wy = Math.floor(y / step) * step; (wy - y) * z <= this.h; wy += step) {
-      const sy = Math.round((wy - y) * z) + 0.5;
-      c.moveTo(0, sy);
-      c.lineTo(this.w, sy);
-    }
-    c.stroke();
 
     this.worldTransform(c);
     const view = { minX: x, minY: y - 30 / z, maxX: x + this.w / z, maxY: y + this.h / z };
@@ -1454,6 +1556,126 @@ export class Board implements BoardApi {
     this.publishSelection();
   }
 
+  /** Cyrkiel: nóżka w środku, ołówek na okręgu, przegub nad nimi (piksele ekranu). */
+  private drawCompassFigure(c: CanvasRenderingContext2D, center: P, tip: P) {
+    this.screenTransform(c);
+    const [cx, cy] = this.toScreen(...center);
+    const [tx, ty] = this.toScreen(...tip);
+    const L = Math.hypot(tx - cx, ty - cy) || 1;
+    // przegub nad środkiem odcinka, zawsze „w górę” ekranu
+    let nx = -(ty - cy) / L, ny = (tx - cx) / L;
+    if (ny > 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    const leg = Math.max(L * 0.62, 70);
+    const h = Math.sqrt(Math.max(leg * leg - (L / 2) * (L / 2), 900));
+    const hx = (cx + tx) / 2 + nx * h, hy = (cy + ty) / 2 + ny * h;
+    c.lineCap = 'round';
+    c.globalAlpha = 0.9;
+    // ramiona
+    c.strokeStyle = '#7a8499';
+    c.lineWidth = 4;
+    c.beginPath();
+    c.moveTo(hx, hy);
+    c.lineTo(cx, cy);
+    c.moveTo(hx, hy);
+    c.lineTo(tx, ty);
+    c.stroke();
+    // nóżka (igła) i ołówek
+    c.fillStyle = '#3d4557';
+    c.beginPath();
+    c.arc(cx, cy, 3, 0, Math.PI * 2);
+    c.fill();
+    c.fillStyle = useUI.getState().color;
+    c.beginPath();
+    c.arc(tx, ty, 4.5, 0, Math.PI * 2);
+    c.fill();
+    // przegub z uchwytem
+    c.fillStyle = '#fff';
+    c.strokeStyle = '#3d4557';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.arc(hx, hy, 6, 0, Math.PI * 2);
+    c.fill();
+    c.stroke();
+    c.beginPath();
+    c.moveTo(hx, hy - 6);
+    c.lineTo(hx + nx * 16, hy + ny * 16 - 6);
+    c.stroke();
+    c.globalAlpha = 1;
+  }
+
+  /** Rozstaw w centymetrach zeszytowych (2 kratki = 1 cm). */
+  private radiusLabel(c: CanvasRenderingContext2D, center: P, tip: P, r: number) {
+    this.screenTransform(c);
+    const [mx, my] = this.toScreen((center[0] + tip[0]) / 2, (center[1] + tip[1]) / 2);
+    c.font = '600 12px system-ui, "Segoe UI", sans-serif';
+    c.textAlign = 'center';
+    c.textBaseline = 'bottom';
+    c.fillStyle = '#1f5fd1';
+    c.fillText(`r = ${(r / (2 * GRID)).toFixed(1).replace(/\.0$/, '')} cm`, mx, my - 6);
+  }
+
+  private renderCompass(c: CanvasRenderingContext2D) {
+    const m = this.mode;
+    if (m?.kind === 'compassSet') {
+      // ustawianie rozstawu: przerywany promień + okrąg orientacyjny
+      const r = Math.hypot(m.p[0] - m.c[0], m.p[1] - m.c[1]);
+      this.worldTransform(c);
+      c.setLineDash([6 / this.cam.z, 5 / this.cam.z]);
+      c.strokeStyle = 'rgba(31, 95, 209, 0.55)';
+      c.lineWidth = 1.2 / this.cam.z;
+      c.beginPath();
+      c.moveTo(...m.c);
+      c.lineTo(...m.p);
+      c.stroke();
+      c.setLineDash([]);
+      this.drawCompassFigure(c, m.c, m.p);
+      if (r > 1) this.radiusLabel(c, m.c, m.p, r);
+      return;
+    }
+    const k = this.compass;
+    if (!k) {
+      // jeszcze nie ustawiony: tu wbijesz nóżkę
+      if (this.hover) {
+        this.screenTransform(c);
+        const p = this.snapHit ? this.toScreen(...this.snapHit) : [this.hover.x, this.hover.y];
+        c.strokeStyle = '#3d4557';
+        c.lineWidth = 1.5;
+        c.beginPath();
+        c.moveTo(p[0] - 7, p[1]);
+        c.lineTo(p[0] + 7, p[1]);
+        c.moveTo(p[0], p[1] - 7);
+        c.lineTo(p[0], p[1] + 7);
+        c.stroke();
+      }
+      return;
+    }
+    // okrąg orientacyjny (kropkowany) – tu rysuje ołówek
+    this.worldTransform(c);
+    c.setLineDash([2 / this.cam.z, 6 / this.cam.z]);
+    c.strokeStyle = 'rgba(31, 95, 209, 0.35)';
+    c.lineWidth = 1.2 / this.cam.z;
+    c.beginPath();
+    c.arc(k.c[0], k.c[1], k.r, 0, Math.PI * 2);
+    c.stroke();
+    c.setLineDash([]);
+
+    let ang = 0;
+    if (m?.kind === 'compassArc') {
+      ang = m.last;
+      const ui = useUI.getState();
+      drawInk(c, { id: '', type: 'shape', kind: 'arc', pts: [k.c], color: ui.color, width: ui.width, arc: { r: k.r, a0: m.a0, sweep: m.sweep } });
+    } else if (this.hover) {
+      const [wx, wy] = this.toWorld(this.hover.x, this.hover.y);
+      ang = Math.atan2(wy - k.c[1], wx - k.c[0]);
+    }
+    const tip: P = [k.c[0] + Math.cos(ang) * k.r, k.c[1] + Math.sin(ang) * k.r];
+    this.drawCompassFigure(c, k.c, tip);
+    this.radiusLabel(c, k.c, tip, k.r);
+  }
+
   private renderFg() {
     const c = this.fctx;
     c.setTransform(1, 0, 0, 1, 0, 0);
@@ -1471,6 +1693,19 @@ export class Board implements BoardApi {
       const s = m.shape;
       // kąt w pierwszym kroku to po prostu ramię
       drawInk(c, s.kind === 'angle' ? { ...s, kind: 'line' } : s);
+    }
+
+    if (ui.tool === 'compass') this.renderCompass(c);
+
+    // kółeczko: tu przyciągnie (punkt konstrukcji)
+    if ((ui.tool === 'compass' || ui.tool === 'shape') && this.snapHit && m?.kind !== 'compassArc') {
+      this.screenTransform(c);
+      const [hx, hy] = this.toScreen(...this.snapHit);
+      c.beginPath();
+      c.arc(hx, hy, 6, 0, Math.PI * 2);
+      c.strokeStyle = '#e07b00';
+      c.lineWidth = 2;
+      c.stroke();
     }
 
     // kąt: drugie ramię za kursorem + podgląd miary

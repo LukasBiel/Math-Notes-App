@@ -6,7 +6,7 @@ import type { El, Orientation, ShapeKind } from '../engine/types';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import type { PdfPageImage } from '../pdf/importPdf';
 
-export type Tool = 'select' | 'pen' | 'eraser' | 'hand' | 'frame' | 'shape';
+export type Tool = 'select' | 'pen' | 'eraser' | 'hand' | 'frame' | 'shape' | 'compass';
 
 export const COLORS = ['#1d2433', '#1f5fd1', '#d1302f', '#1f9d55', '#e07b00', '#7b3fc4'];
 export const WIDTHS = [1.5, 3, 6, 12];
@@ -74,6 +74,8 @@ interface UIState {
   frameOrientation: Orientation;
   pdfGrid: boolean;
   shapeKind: ShapeKind;
+  /** kratka na tablicy */
+  showGrid: boolean;
 
   // organizacja (zapisywane)
   currentNoteId: string | null;
@@ -119,6 +121,7 @@ export const useUI = create<UIState>()(
       frameOrientation: 'portrait',
       pdfGrid: true,
       shapeKind: 'line',
+      showGrid: true,
 
       currentNoteId: null,
       lastClassId: null,
@@ -156,6 +159,7 @@ export const useUI = create<UIState>()(
         frameOrientation: s.frameOrientation,
         pdfGrid: s.pdfGrid,
         shapeKind: s.shapeKind,
+        showGrid: s.showGrid,
         currentNoteId: s.currentNoteId,
         lastClassId: s.lastClassId,
         lastKind: s.lastKind,

@@ -41,12 +41,13 @@ export interface ImageEl {
   imageId: string;
 }
 
-export type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle' | 'angle' | 'axes' | 'numberline';
+export type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle' | 'angle' | 'axes' | 'numberline' | 'arc';
 
 /**
  * Figura geometryczna. Znaczenie punktów zależy od rodzaju:
  * line/arrow: [początek, koniec]; rect/ellipse/triangle: [róg, róg przeciwny];
- * angle: [wierzchołek, ramię 1, ramię 2]; axes: [róg, róg, początek układu]; numberline: [lewy, prawy, zero].
+ * angle: [wierzchołek, ramię 1, ramię 2]; axes: [róg, róg, początek układu]; numberline: [lewy, prawy, zero];
+ * arc (cyrkiel): [środek] + pole arc.
  */
 export interface Shape {
   id: string;
@@ -59,6 +60,8 @@ export interface Shape {
   right?: boolean;
   /** długość jednostki na osiach (świat) */
   unit?: number;
+  /** łuk z cyrkla: promień, kąt początkowy i rozwarcie (radiany, ze znakiem kierunku) */
+  arc?: { r: number; a0: number; sweep: number };
 }
 
 export type El = Stroke | Frame | ImageEl | Shape;

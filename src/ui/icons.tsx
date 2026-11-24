@@ -45,6 +45,14 @@ export const SelectIcon = () => (
   <svg {...base}><path d="M5 3l14 8-6 1.5L10 19 5 3z" /></svg>
 );
 
+export const CompassIcon = () => (
+  <svg {...base}><circle cx="12" cy="4.5" r="1.8" /><path d="M11 6.2L6 20M13 6.2L18 20" /><path d="M7.5 15.5h9" /></svg>
+);
+
+export const GridIcon = () => (
+  <svg {...base}><rect x="4" y="4" width="16" height="16" rx="1.5" /><path d="M9.3 4v16M14.7 4v16M4 9.3h16M4 14.7h16" /></svg>
+);
+
 /** Ikony figur – rysowane tak, jak wygląda figura. */
 export function ShapeIcon({ kind }: { kind: string }) {
   switch (kind) {

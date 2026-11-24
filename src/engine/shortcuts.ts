@@ -7,7 +7,8 @@ export type Action =
   | 'newNote' | 'search' | 'toggleSidebar'
   | 'frame' | 'addPage' | 'exportPdf'
   | 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle' | 'angle' | 'axes' | 'numberline'
-  | 'selectAll' | 'duplicate' | 'importPdf';
+  | 'selectAll' | 'duplicate' | 'importPdf'
+  | 'compass' | 'toggleGrid';
 
 export type ShortcutMap = Record<Action, string[]>;
 
@@ -44,6 +45,8 @@ export const ACTION_LABELS: Record<Action, string> = {
   selectAll: 'Select all',
   duplicate: 'Duplicate selection',
   importPdf: 'Import PDF',
+  compass: 'Compass',
+  toggleGrid: 'Grid on/off',
 };
 
 export const SHAPE_ACTIONS = ['line', 'arrow', 'rect', 'ellipse', 'triangle', 'angle', 'axes', 'numberline'] as const;
@@ -81,6 +84,8 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   selectAll: ['ctrl+a'],
   duplicate: ['ctrl+d'],
   importPdf: ['ctrl+o'],
+  compass: ['c'],
+  toggleGrid: ['g'],
 };
 
 function keyName(e: KeyboardEvent) {

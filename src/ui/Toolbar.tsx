@@ -1,5 +1,6 @@
 import { COLORS, useUI, WIDTHS, type Tool } from './store';
 import { ShapesButton } from './ShapesButton';
+import { CompassIcon, GridIcon } from './icons';
 import { EraserIcon, HandIcon, LandscapeIcon, PageIcon, PenIcon, PortraitIcon, RedoIcon, SelectIcon, UndoIcon } from './icons';
 
 const TOOLS: { id: Tool; label: string; icon: () => React.JSX.Element }[] = [
@@ -13,7 +14,7 @@ export function Toolbar() {
   const s = useUI();
   const set = useUI.setState;
   // kolor/grubość: przy figurach zostajemy w figurach, inaczej wracamy do pisaka
-  const drawTool = s.tool === 'shape' ? 'shape' : 'pen';
+  const drawTool = s.tool === 'shape' || s.tool === 'compass' ? s.tool : 'pen';
 
   return (
     // po kliknięciu oddajemy fokus, żeby spacja/skróty nie „klikały” przycisków
@@ -25,6 +26,13 @@ export function Toolbar() {
           </button>
         ))}
         <ShapesButton />
+        <button
+          className={s.tool === 'compass' ? 'active' : ''}
+          title="Compass (C) – drag from the center to set the radius, then draw arcs along the dotted circle; click elsewhere to move the needle with the same radius"
+          onClick={() => set({ tool: 'compass' })}
+        >
+          <CompassIcon />
+        </button>
       </div>
 
       <div className="group">
@@ -120,6 +128,13 @@ export function Toolbar() {
       </div>
 
       <div className="group">
+        <button
+          className={s.showGrid ? 'active' : ''}
+          title={(s.showGrid ? 'Hide' : 'Show') + ' grid (G)'}
+          onClick={() => set({ showGrid: !s.showGrid, pdfGrid: !s.showGrid })}
+        >
+          <GridIcon />
+        </button>
         <button className="text" title="Zoom out (-)" onClick={() => s.api?.zoomBy(0.8)}>−</button>
         <button className="text zoom" title="Reset zoom (0)" onClick={() => s.api?.zoomReset()}>
           {Math.round(s.zoom * 100)}%

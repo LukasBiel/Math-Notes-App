@@ -27,6 +27,7 @@ export const SHAPE_LABELS: Record<ShapeKind, string> = {
   angle: 'Angle',
   axes: 'Coordinate axes',
   numberline: 'Number line',
+  arc: 'Compass arc',
 };
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
@@ -95,7 +96,7 @@ function axisTicks(geo: ShapeGeo, s: Shape, o: P, b: ReturnType<typeof box>, wit
 function build(s: Shape): ShapeGeo {
   const geo: ShapeGeo = { paths: [], fills: [], texts: [] };
   const [p1, p2, p3] = s.pts;
-  const b = box(p1, p2);
+  const b = box(p1, p2 ?? p1); // łuk ma tylko środek
 
   switch (s.kind) {
     case 'line':
@@ -158,6 +159,18 @@ function build(s: Shape): ShapeGeo {
     case 'axes': {
       const o: P = [clamp(p3[0], b.minX, b.maxX), clamp(p3[1], b.minY, b.maxY)];
       axisTicks(geo, s, o, b, true);
+      break;
+    }
+    case 'arc': {
+      if (!s.arc) break;
+      const { r, a0, sweep } = s.arc;
+      const n = Math.max(8, Math.ceil(Math.abs(sweep) * 24));
+      const pts: P[] = [];
+      for (let i = 0; i <= n; i++) {
+        const t = a0 + (sweep * i) / n;
+        pts.push([p1[0] + Math.cos(t) * r, p1[1] + Math.sin(t) * r]);
+      }
+      geo.paths.push({ pts, closed: false });
       break;
     }
     case 'numberline': {

@@ -30,7 +30,7 @@ export function ShapesButton() {
     <div className="shapes" ref={ref}>
       <button
         className={tool === 'shape' ? 'active' : ''}
-        title={`${SHAPE_LABELS[kind]} (${DEFAULT_SHORTCUTS[kind][0].toUpperCase()}) – click again for more shapes`}
+        title={`${SHAPE_LABELS[kind]} (${((DEFAULT_SHORTCUTS as Record<string, string[]>)[kind]?.[0] ?? '').toUpperCase()}) – click again for more shapes`}
         onClick={() => (tool === 'shape' ? setOpen(!open) : pick(kind))}
       >
         <ShapeIcon kind={kind} />

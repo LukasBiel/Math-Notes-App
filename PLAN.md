@@ -78,7 +78,7 @@ Każdy etap kończy się czymś, czego można używać i co testujesz na swoim t
 2. **Zapis i organizacja** (✔ pierwsza wersja: klasy → tematy → notatki, typy notatek, automatyczne nazwy, Alt+N, Ctrl+K, kosz z Undo, przeciąganie między klasami, puste notatki znikają same) — autozapis w przeglądarce, foldery, nazwy, panel boczny, otwieranie ostatniej notatki.
 3. **Online** (✔ wdrożone na Coolify, logowanie Google działa) — hosting + logowanie + synchronizacja (Postgres na Hetznerze). Od tego momentu wchodzisz z komputera szkolnego.
 4. **Ramki i PDF** (✔ narzędzie strony F, + Page, przeciąganie strony z treścią, nazwy, pion/poziom, eksport wektorowy z miniaturami, Ctrl+P; bez stron – automatyczny podział na A4) — ramki A4, eksport wektorowy.
-5. **Figury i zaznaczanie** (✔ odcinek, strzałka, prostokąt, okrąg, trójkąt, kąt z miarą, układ współrzędnych, oś liczbowa; lasso/klik, przesuwanie, skalowanie, kolor, kopiuj/wklej/duplikuj) — zostało: prostowanie przez przytrzymanie.
+5. **Figury i zaznaczanie** (✔ odcinek, strzałka, prostokąt, okrąg, trójkąt, kąt z miarą, układ współrzędnych, oś liczbowa; lasso/klik, przesuwanie, skalowanie, kolor, kopiuj/wklej/duplikuj; cyrkiel z przyciąganiem do przecięć łuków i prostych; kratka do wyłączenia) — zostało: prostowanie przez przytrzymanie.
 6. **Wygoda** — edycja skrótów, gumka częściowa, zakreślacz, PWA/offline. (✔ „cofnij serię” – Alt+Z, zrobione w etapie 1)
 7. **Dodatki (opcjonalnie)** — wzory LaTeX, wykresy funkcji, linijka/kątomierz. (✔ wklejanie obrazków Ctrl+V, zmiana rozmiaru stron, import PDF do pisania po nim – Ctrl+O / przeciągnięcie pliku)
 
